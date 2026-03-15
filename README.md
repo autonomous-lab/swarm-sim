@@ -138,25 +138,13 @@ swarm-sim report -c config.toml -o report.md
 
 ## Web UI
 
-The web interface runs at `http://localhost:3000` (configurable) and provides:
+The web interface runs at `http://localhost:3000` (configurable) and provides a real-time simulation dashboard:
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  HEADER: swarm-sim | Round 14/72 | 42 active | ⏸ Pause  │
-├────────────────┬─────────────────────┬───────────────────┤
-│  AGENTS PANEL  │   FEED / TIMELINE   │   GOD'S EYE       │
-│                │                     │                   │
-│ Filter by tier │  Live action feed   │  Inject events:   │
-│ Click agent →  │  Trending posts     │  - Breaking news  │
-│   profile,     │  Round timeline     │  - Viral content  │
-│   memory,      │  Color-coded by     │  - Mood shifts    │
-│   action       │  tier + action type │  - Announcements  │
-│   history      │                     │                   │
-│                │                     │  Live stats       │
-├────────────────┴─────────────────────┴───────────────────┤
-│  STATS: Posts | Likes | Replies | Reposts | Actions      │
-└──────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="screenshots/feed-view.png" alt="swarm-sim feed view" width="100%">
+</p>
+
+Three-panel layout: agents list (left), live feed with posts/replies/likes (center), and God's Eye event injection + stats (right). Posts are color-coded by tier and action type.
 
 ### Keyboard Shortcuts
 
