@@ -1,0 +1,88 @@
+# swarm-sim configuration
+
+[simulation]
+total_rounds = 72
+minutes_per_round = 60
+seed_documents = ["./data/news.md"]
+scenario_prompt = """
+Simulate public reaction on social media to a major tech company
+announcing layoffs of 10,000 employees. Include reactions from
+employees, industry analysts, competitors, and the general public.
+"""
+random_seed = 0  # 0 = use system entropy
+
+# --- Tier Configuration ---
+# Tier 1: VIP agents (opinion leaders, key figures) — individual LLM calls
+[tiers.tier1]
+batch_size = 1
+model = "gpt-4o"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+temperature = 0.8
+max_tokens = 2048
+max_concurrency = 5
+max_retries = 3
+timeout_secs = 60
+
+# Tier 2: Standard agents — batched in groups of 8
+[tiers.tier2]
+batch_size = 8
+model = "gpt-4o-mini"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+temperature = 0.7
+max_tokens = 4096
+max_concurrency = 10
+max_retries = 2
+timeout_secs = 90
+
+# Tier 3: Figurants — batched in groups of 25
+[tiers.tier3]
+batch_size = 25
+model = "qwen-plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "${DASHSCOPE_API_KEY}"
+temperature = 0.6
+max_tokens = 8192
+max_concurrency = 15
+max_retries = 2
+timeout_secs = 120
+
+# LLM used for entity extraction and report generation
+[llm]
+extraction_model = "gpt-4o"
+extraction_base_url = "https://api.openai.com/v1"
+extraction_api_key = "${OPENAI_API_KEY}"
+
+# World simulation parameters
+[world]
+feed_size = 15
+trending_count = 10
+recency_weight = 0.4
+popularity_weight = 0.3
+relevance_weight = 0.3
+
+# Document parsing
+[parser]
+max_chars_per_doc = 50000
+chunk_size = 4000
+chunk_overlap = 200
+
+# Output
+[output]
+output_dir = "./output"
+action_log = "actions.jsonl"
+report_file = "report.md"
+verbose = true
+
+# Web server
+[server]
+host = "0.0.0.0"
+port = 3000
+enabled = true
+
+# God's Eye — live event injection
+[god_eye]
+events_file = "./events.toml"
+debounce_ms = 500
+enabled = true

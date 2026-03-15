@@ -1,0 +1,31 @@
+# God's Eye — Event Injection
+# Drop events here while the simulation runs. The file watcher picks them up.
+# Each event is injected once (tracked by ID). Safe to append new events at any time.
+
+[[events]]
+id = "breaking-001"
+inject_at_round = 10  # Optional: inject at specific round (omit = inject immediately)
+event_type = "breaking_news"
+content = """
+BREAKING: The CEO has just resigned effective immediately,
+citing personal reasons. The board has appointed an interim CEO.
+"""
+
+[[events]]
+id = "mood-shift-001"
+event_type = "agent_mood"
+content = "agent:analyst_jane sentiment_bias:-0.8"
+
+[[events]]
+id = "viral-001"
+inject_at_round = 15
+event_type = "viral_content"
+content = """
+A leaked internal memo reveals the real layoff numbers are 15,000,
+not 10,000 as announced.
+"""
+
+[[events]]
+id = "announcement-001"
+event_type = "system_announcement"
+content = "The platform is now trending #TechLayoffs worldwide"

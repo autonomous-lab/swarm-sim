@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swarm-Sim</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Header -->
+  <header id="header">
+    <div class="header-left">
+      <h1>Swarm-Sim</h1>
+      <span class="subtitle">Multi-Agent Social Simulation</span>
+    </div>
+    <div class="header-center">
+      <span id="status-badge" class="badge">IDLE</span>
+      <span id="round-info">Round 0/0</span>
+      <span id="agent-count">0 agents</span>
+    </div>
+    <div class="header-right">
+      <button id="btn-pause" onclick="pauseSim()" disabled>Pause</button>
+      <button id="btn-resume" onclick="resumeSim()" disabled>Resume</button>
+      <button id="btn-stop" onclick="stopSim()" disabled>Stop</button>
+    </div>
+  </header>
+
+  <!-- Main layout -->
+  <main id="app">
+    <!-- Left: Agents panel -->
+    <aside id="agents-panel">
+      <h2>Agents</h2>
+      <div id="agents-filter">
+        <button class="filter-btn active" onclick="filterAgents('all')">All</button>
+        <button class="filter-btn" onclick="filterAgents('tier1')">VIP</button>
+        <button class="filter-btn" onclick="filterAgents('tier2')">Std</button>
+        <button class="filter-btn" onclick="filterAgents('tier3')">Fig</button>
+      </div>
+      <div id="agents-list"></div>
+    </aside>
+
+    <!-- Center: Feed -->
+    <section id="feed-panel">
+      <div id="feed-tabs">
+        <button class="tab-btn active" onclick="switchTab('feed')">Live Feed</button>
+        <button class="tab-btn" onclick="switchTab('trending')">Trending</button>
+        <button class="tab-btn" onclick="switchTab('timeline')">Timeline</button>
+      </div>
+      <div id="feed-content">
+        <div id="feed-list" class="tab-content active"></div>
+        <div id="trending-list" class="tab-content"></div>
+        <div id="timeline-list" class="tab-content"></div>
+      </div>
+    </section>
+
+    <!-- Right: God's Eye -->
+    <aside id="god-eye-panel">
+      <h2>God's Eye</h2>
+
+      <div class="god-eye-section">
+        <h3>Inject Event</h3>
+        <select id="event-type">
+          <option value="breaking_news">Breaking News</option>
+          <option value="viral_content">Viral Content</option>
+          <option value="system_announcement">Announcement</option>
+          <option value="agent_mood">Agent Mood Shift</option>
+        </select>
+        <textarea id="event-content" placeholder="Event content..." rows="3"></textarea>
+        <div class="inject-row">
+          <input type="number" id="event-round" placeholder="Round (optional)" min="1">
+          <button onclick="injectEvent()">Inject</button>
+        </div>
+      </div>
+
+      <div class="god-eye-section">
+        <h3>Event Log</h3>
+        <div id="event-log"></div>
+      </div>
+
+      <div class="god-eye-section">
+        <h3>Stats</h3>
+        <div id="stats-panel">
+          <div class="stat"><span class="stat-label">Posts</span><span id="stat-posts">0</span></div>
+          <div class="stat"><span class="stat-label">Likes</span><span id="stat-likes">0</span></div>
+          <div class="stat"><span class="stat-label">Replies</span><span id="stat-replies">0</span></div>
+          <div class="stat"><span class="stat-label">Reposts</span><span id="stat-reposts">0</span></div>
+          <div class="stat"><span class="stat-label">Actions</span><span id="stat-actions">0</span></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Agent detail modal -->
+  <div id="agent-modal" class="modal" onclick="if(event.target===this)closeModal()">
+    <div class="modal-content">
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <div id="agent-detail"></div>
+    </div>
+  </div>
+
+  <script src="components.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

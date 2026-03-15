@@ -1,0 +1,57 @@
+[package]
+name = "swarm-sim"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Multi-agent social simulation engine with tiered LLM batching"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Web framework
+axum = { version = "0.7", features = ["ws", "json"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# File watching
+notify = "7"
+notify-debouncer-mini = "0.5"
+
+# PDF extraction
+pdf-extract = "0.8"
+
+# Terminal UI
+indicatif = "0.17"
+colored = "2"
+
+# Regex (lightweight, no-std compatible)
+regex-lite = "0.1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

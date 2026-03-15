@@ -1,0 +1,7 @@
+/target/
+Cargo.lock
+*.db
+config.toml
+events.toml
+/output/
+.env
