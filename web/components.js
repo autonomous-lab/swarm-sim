@@ -3,11 +3,12 @@
 // ================================================================
 
 function renderAgentCard(agent) {
+  const stanceDot = getStanceDot(agent.stance);
   return `
     <div class="agent-card" onclick="showAgent('${agent.id}')" data-tier="${agent.tier}">
       <div class="agent-tier-dot ${agent.tier}"></div>
       <div class="agent-info">
-        <div class="agent-username">@${esc(agent.username)}</div>
+        <div class="agent-username">@${esc(agent.username)} ${stanceDot}</div>
         <div class="agent-bio">${esc(agent.bio)}</div>
         <div class="agent-stats">${agent.post_count} posts &middot; ${agent.follower_count} followers</div>
       </div>
@@ -82,27 +83,114 @@ function renderTrendingPost(post, rank) {
     </div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Enhanced Agent Detail Modal
+// ---------------------------------------------------------------------------
+
 function renderAgentDetail(data) {
   const { profile, state, recent_posts } = data;
   const tierLabel = { tier1: 'VIP', tier2: 'Standard', tier3: 'Figurant' }[profile.tier] || '';
+  const stanceDot = getStanceDot(profile.stance);
+  const stanceClass = profile.stance || 'neutral';
 
-  let memoryHtml = '';
+  // Profile section
+  let profileHtml = `
+    <div class="agent-detail-header">
+      <div class="agent-detail-name">${esc(profile.name)}</div>
+      <div class="agent-detail-username">@${esc(profile.username)} &middot; ${tierLabel}</div>
+    </div>
+    <div class="agent-detail-section">
+      <p>${esc(profile.bio)}</p>
+    </div>
+    <div class="detail-meta-row">
+      <span class="stance-pill ${stanceClass}">${stanceDot} ${esc(profile.stance)}</span>
+      <span class="sentiment-indicator">Sentiment: ${renderSentimentBar(profile.sentiment_bias)}</span>
+    </div>`;
+
+  // Demographics
+  let demoHtml = '';
+  const demoItems = [];
+  if (profile.age) demoItems.push(`Age: ${profile.age}`);
+  if (profile.profession) demoItems.push(esc(profile.profession));
+  if (profile.activity_level !== undefined) demoItems.push(`Activity: ${(profile.activity_level * 100).toFixed(0)}%`);
+  if (demoItems.length > 0) {
+    demoHtml = `<div class="detail-demo">${demoItems.join(' &middot; ')}</div>`;
+  }
+
+  // Interests
+  let interestsHtml = '';
+  if (profile.interests && profile.interests.length > 0) {
+    interestsHtml = `<div class="detail-interests">${
+      profile.interests.map(i => `<span class="interest-pill">${esc(i)}</span>`).join('')
+    }</div>`;
+  }
+
+  // Stats
+  let statsHtml = '';
+  if (state) {
+    statsHtml = `
+    <div class="detail-stats-grid">
+      <div class="detail-stat"><span class="detail-stat-num">${state.post_ids.length}</span><span class="detail-stat-label">Posts</span></div>
+      <div class="detail-stat"><span class="detail-stat-num">${state.followers.length}</span><span class="detail-stat-label">Followers</span></div>
+      <div class="detail-stat"><span class="detail-stat-num">${state.following.length}</span><span class="detail-stat-label">Following</span></div>
+      <div class="detail-stat"><span class="detail-stat-num">${state.liked_post_ids.length}</span><span class="detail-stat-label">Likes</span></div>
+    </div>`;
+  }
+
+  // Tabs: Activity, Memory, Posts
+  let tabsHtml = `
+    <div class="detail-tabs">
+      <button class="detail-tab active" onclick="switchDetailTab(this,'activity')">Activity</button>
+      <button class="detail-tab" onclick="switchDetailTab(this,'memory')">Memory</button>
+      <button class="detail-tab" onclick="switchDetailTab(this,'posts')">Posts</button>
+    </div>`;
+
+  // Activity tab (action_log)
+  let activityHtml = '<div class="detail-tab-content active" data-tab="activity">';
+  if (state && state.action_log && state.action_log.length > 0) {
+    const entries = [...state.action_log].reverse();
+    activityHtml += entries.map(e => {
+      const badge = getActionBadge(e.action_type);
+      const preview = e.content ? esc(e.content).slice(0, 100) : '';
+      return `<div class="action-log-entry">
+        <span class="action-log-round">R${e.round}</span>
+        ${badge}
+        ${preview ? `<span class="action-log-text">${preview}</span>` : ''}
+      </div>`;
+    }).join('');
+  } else {
+    activityHtml += '<div class="detail-empty">No activity yet</div>';
+  }
+  activityHtml += '</div>';
+
+  // Memory tab
+  let memoryHtml = '<div class="detail-tab-content" data-tab="memory">';
   if (state && state.memory) {
     if (state.memory.pinned.length > 0) {
+      memoryHtml += '<div class="memory-section-label">Pinned Memories</div>';
       memoryHtml += state.memory.pinned.map(m =>
         `<div class="memory-item pinned">${esc(m)}</div>`
       ).join('');
     }
     if (state.memory.recent.length > 0) {
+      memoryHtml += '<div class="memory-section-label">Recent Observations</div>';
       memoryHtml += state.memory.recent.slice(-10).map(([round, obs]) =>
         `<div class="memory-item">[R${round}] ${esc(obs)}</div>`
       ).join('');
     }
+    if (state.memory.pinned.length === 0 && state.memory.recent.length === 0) {
+      memoryHtml += '<div class="detail-empty">No memories yet</div>';
+    }
+  } else {
+    memoryHtml += '<div class="detail-empty">No memory data</div>';
   }
+  memoryHtml += '</div>';
 
-  let postsHtml = '';
+  // Posts tab
+  let postsTabHtml = '<div class="detail-tab-content" data-tab="posts">';
   if (recent_posts && recent_posts.length > 0) {
-    postsHtml = recent_posts.slice(-10).map(p =>
+    const sorted = [...recent_posts].sort((a, b) => b.created_at_round - a.created_at_round);
+    postsTabHtml += sorted.slice(0, 15).map(p =>
       `<div class="post-card" style="margin-bottom:4px">
         <div class="post-content">${esc(p.content)}</div>
         <div class="post-actions-bar">
@@ -112,41 +200,136 @@ function renderAgentDetail(data) {
         </div>
       </div>`
     ).join('');
+  } else {
+    postsTabHtml += '<div class="detail-empty">No posts yet</div>';
+  }
+  postsTabHtml += '</div>';
+
+  return profileHtml + demoHtml + interestsHtml + statsHtml + tabsHtml + activityHtml + memoryHtml + postsTabHtml;
+}
+
+function switchDetailTab(btn, tabName) {
+  const modal = btn.closest('.modal-content');
+  modal.querySelectorAll('.detail-tab').forEach(b => b.classList.remove('active'));
+  modal.querySelectorAll('.detail-tab-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  modal.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+}
+
+function renderSentimentBar(bias) {
+  const pct = ((bias + 1) / 2 * 100).toFixed(0);
+  const color = bias > 0.3 ? 'var(--accent-green)' : bias < -0.3 ? 'var(--accent-red)' : 'var(--accent-yellow)';
+  return `<span class="sentiment-bar"><span class="sentiment-fill" style="width:${pct}%;background:${color}"></span></span> <span style="font-size:11px">${bias.toFixed(1)}</span>`;
+}
+
+function getStanceDot(stance) {
+  const colors = {
+    supportive: 'var(--accent-green)',
+    opposing: 'var(--accent-red)',
+    neutral: 'var(--accent-yellow)',
+    observer: 'var(--text-muted)'
+  };
+  const color = colors[stance] || 'var(--text-muted)';
+  return `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color};margin-left:4px"></span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+function renderDashboard(data) {
+  if (!data || data.total_agents === 0) {
+    return '<div class="detail-empty" style="padding:40px">No simulation data yet. Launch a simulation to see the dashboard.</div>';
   }
 
-  return `
-    <div class="agent-detail-header">
-      <div class="agent-detail-name">${esc(profile.name)}</div>
-      <div class="agent-detail-username">@${esc(profile.username)} &middot; ${tierLabel}</div>
-    </div>
-    <div class="agent-detail-section">
-      <h4>Bio</h4>
-      <p>${esc(profile.bio)}</p>
-    </div>
-    <div class="agent-detail-section">
-      <h4>Persona</h4>
-      <p>${esc(profile.persona)}</p>
-    </div>
-    <div class="agent-detail-section">
-      <h4>Stance: ${profile.stance} | Sentiment: ${profile.sentiment_bias.toFixed(1)}</h4>
-    </div>
-    ${state ? `
-    <div class="agent-detail-section">
-      <h4>Stats</h4>
-      <p>${state.post_ids.length} posts &middot; ${state.followers.length} followers &middot; ${state.following.length} following</p>
-    </div>` : ''}
-    ${memoryHtml ? `
-    <div class="agent-detail-section">
-      <h4>Memory</h4>
-      ${memoryHtml}
-    </div>` : ''}
-    ${postsHtml ? `
-    <div class="agent-detail-section">
-      <h4>Recent Posts</h4>
-      ${postsHtml}
-    </div>` : ''}
-  `;
+  // Metrics cards
+  const metricsHtml = `
+    <div class="dash-metrics">
+      <div class="dash-metric-card"><div class="dash-metric-num">${data.total_agents}</div><div class="dash-metric-label">Agents</div></div>
+      <div class="dash-metric-card"><div class="dash-metric-num">${data.total_posts}</div><div class="dash-metric-label">Posts</div></div>
+      <div class="dash-metric-card"><div class="dash-metric-num">${data.total_actions}</div><div class="dash-metric-label">Actions</div></div>
+      <div class="dash-metric-card"><div class="dash-metric-num">${data.activity_per_round.length}</div><div class="dash-metric-label">Rounds</div></div>
+    </div>`;
+
+  // Stance distribution (horizontal bars)
+  const stanceEntries = Object.entries(data.stance_distribution);
+  const maxStance = Math.max(...stanceEntries.map(([, v]) => v), 1);
+  const stanceColors = { supportive: 'var(--accent-green)', opposing: 'var(--accent-red)', neutral: 'var(--accent-yellow)', observer: 'var(--text-muted)' };
+  const stanceHtml = `
+    <div class="dash-section">
+      <h3>Stance Distribution</h3>
+      <div class="dash-bars">
+        ${stanceEntries.map(([stance, count]) => `
+          <div class="dash-bar-row">
+            <span class="dash-bar-label">${esc(stance)}</span>
+            <div class="dash-bar-track"><div class="dash-bar-fill" style="width:${(count/maxStance*100).toFixed(0)}%;background:${stanceColors[stance] || 'var(--accent-cyan)'}"></div></div>
+            <span class="dash-bar-value">${count}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  // Tier distribution
+  const tierEntries = Object.entries(data.tier_distribution);
+  const maxTier = Math.max(...tierEntries.map(([, v]) => v), 1);
+  const tierColors = { VIP: 'var(--tier1)', Standard: 'var(--tier2)', Figurant: 'var(--tier3)' };
+  const tierHtml = `
+    <div class="dash-section">
+      <h3>Tier Distribution</h3>
+      <div class="dash-bars">
+        ${tierEntries.map(([tier, count]) => `
+          <div class="dash-bar-row">
+            <span class="dash-bar-label">${esc(tier)}</span>
+            <div class="dash-bar-track"><div class="dash-bar-fill" style="width:${(count/maxTier*100).toFixed(0)}%;background:${tierColors[tier] || 'var(--accent-cyan)'}"></div></div>
+            <span class="dash-bar-value">${count}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  // Activity sparkline (per round)
+  let sparkHtml = '';
+  if (data.activity_per_round.length > 0) {
+    const maxActivity = Math.max(...data.activity_per_round.map(r => r.posts + r.replies + r.likes), 1);
+    sparkHtml = `
+    <div class="dash-section">
+      <h3>Activity per Round</h3>
+      <div class="dash-sparkline">
+        ${data.activity_per_round.map(r => {
+          const total = r.posts + r.replies + r.likes;
+          const h = (total / maxActivity * 60).toFixed(0);
+          return `<div class="spark-col" title="R${r.round}: ${r.posts}p ${r.replies}r ${r.likes}l (${r.active_agents} active)">
+            <div class="spark-bar" style="height:${h}px"></div>
+            <div class="spark-label">R${r.round}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Top agents leaderboard
+  let leaderboardHtml = '';
+  if (data.top_agents.length > 0) {
+    leaderboardHtml = `
+    <div class="dash-section">
+      <h3>Top Agents</h3>
+      <div class="dash-leaderboard">
+        ${data.top_agents.map((a, i) => `
+          <div class="leader-row">
+            <span class="leader-rank">${i + 1}</span>
+            <span class="leader-name">@${esc(a.username)}</span>
+            <span class="leader-tier">${esc(a.tier)}</span>
+            <span class="leader-stats">${a.post_count}p ${a.follower_count}f</span>
+            <span class="leader-stance" style="color:${stanceColors[a.stance] || 'var(--text-muted)'}">${esc(a.stance)}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  return metricsHtml + stanceHtml + tierHtml + sparkHtml + leaderboardHtml;
 }
+
+// ---------------------------------------------------------------------------
+// Event + Badge helpers
+// ---------------------------------------------------------------------------
 
 function renderEventEntry(event) {
   const typeLabel = event.event_type || event.type || 'unknown';
@@ -165,6 +348,7 @@ function getActionBadge(actionType) {
     like: '<span class="action-badge like">LIKE</span>',
     repost: '<span class="action-badge repost">REPOST</span>',
     follow: '<span class="action-badge follow">FOLLOW</span>',
+    pin_memory: '<span class="action-badge pin">PIN</span>',
   };
   return map[actionType] || '';
 }

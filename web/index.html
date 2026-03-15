@@ -25,6 +25,45 @@
     </div>
   </header>
 
+  <!-- Scenario banner -->
+  <div id="scenario-banner" class="scenario-banner hidden">
+    <span class="scenario-label">SCENARIO</span>
+    <span id="scenario-text"></span>
+  </div>
+
+  <!-- Synthesis panel -->
+  <div id="synthesis-panel" class="synthesis-panel hidden">
+    <div class="synthesis-header" onclick="toggleSynthesis()">
+      <span class="synthesis-label">LIVE ANALYSIS</span>
+      <span class="synthesis-round" id="synthesis-round"></span>
+      <span class="synthesis-toggle" id="synthesis-toggle">&#9660;</span>
+    </div>
+    <div class="synthesis-body" id="synthesis-body"></div>
+  </div>
+
+  <!-- Launch panel (shown when idle/finished) -->
+  <div id="launch-panel" class="launch-panel">
+    <div class="launch-inner">
+      <h2>Launch New Simulation</h2>
+      <div class="launch-field">
+        <label for="launch-scenario">Scenario Prompt</label>
+        <textarea id="launch-scenario" rows="4" placeholder="Describe the scenario to simulate... e.g. 'Simulate public reaction on social media to a major tech company announcing mass layoffs due to AI automation.'"></textarea>
+      </div>
+      <div class="launch-row">
+        <div class="launch-field">
+          <label for="launch-rounds">Rounds</label>
+          <input type="number" id="launch-rounds" value="5" min="1" max="100">
+        </div>
+        <div class="launch-field" style="flex:1">
+          <label for="launch-seed">Seed Document (optional)</label>
+          <textarea id="launch-seed" rows="3" placeholder="Paste background info, news article, or context text..."></textarea>
+        </div>
+      </div>
+      <button class="primary launch-btn" id="btn-launch" onclick="launchSim()">Launch Simulation</button>
+      <div id="launch-status" class="launch-status"></div>
+    </div>
+  </div>
+
   <!-- Main layout -->
   <main id="app">
     <!-- Left: Agents panel -->
@@ -45,11 +84,13 @@
         <button class="tab-btn active" onclick="switchTab('feed')">Live Feed</button>
         <button class="tab-btn" onclick="switchTab('trending')">Trending</button>
         <button class="tab-btn" onclick="switchTab('timeline')">Timeline</button>
+        <button class="tab-btn" onclick="switchTab('dashboard')">Dashboard</button>
       </div>
       <div id="feed-content">
         <div id="feed-list" class="tab-content active"></div>
         <div id="trending-list" class="tab-content"></div>
         <div id="timeline-list" class="tab-content"></div>
+        <div id="dashboard-content" class="tab-content"></div>
       </div>
     </section>
 

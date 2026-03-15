@@ -2,6 +2,7 @@ mod agent;
 mod config;
 mod engine;
 mod god_eye;
+mod launcher;
 mod llm;
 mod output;
 mod parser;
@@ -51,6 +52,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Start web server only (launch simulations from UI)
+    Server {
+        /// Path to config.toml
+        #[arg(short, long, default_value = "config.toml")]
+        config: PathBuf,
+    },
     /// Extract entities from seed documents (dry run)
     Extract {
         #[arg(short, long, default_value = "config.toml")]
@@ -93,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validate { config } => cmd_validate(&config),
         Commands::Extract { config, output } => cmd_extract(&config, output.as_deref()).await,
         Commands::Report { config, output } => cmd_report(&config, &output).await,
+        Commands::Server { config } => cmd_server(&config).await,
         Commands::Run {
             config,
             rounds,
@@ -149,7 +157,6 @@ async fn cmd_extract(
         config.llm.extraction_api_key.clone(),
     );
 
-    // Parse documents
     let mut documents = Vec::new();
     for doc_path in &config.simulation.seed_documents {
         match parser::parse_document(doc_path, config.parser.max_chars_per_doc) {
@@ -196,7 +203,6 @@ async fn cmd_report(
         config.llm.extraction_api_key.clone(),
     );
 
-    // Build a minimal state for report generation
     let state = SimulationState {
         status: SimStatus::Finished,
         agents: HashMap::new(),
@@ -204,12 +210,77 @@ async fn cmd_report(
         world: WorldState::new(chrono::Utc::now()),
         config: config.clone(),
         total_actions: 0,
+        syntheses: Vec::new(),
     };
 
     let report_text = report::generate_report(&llm, &state).await?;
     std::fs::write(output, &report_text)?;
     println!("Report saved to {}", output.display());
     Ok(())
+}
+
+/// Start web server only — simulations launched from UI.
+async fn cmd_server(config_path: &std::path::Path) -> anyhow::Result<()> {
+    output::print_banner();
+
+    let config = SimConfig::load(config_path)?;
+
+    let llm = Arc::new(LlmClient::new(
+        &config.tiers,
+        config.llm.extraction_model.clone(),
+        config.llm.extraction_base_url.clone(),
+        config.llm.extraction_api_key.clone(),
+    ));
+
+    // Empty state — Idle, waiting for launch
+    let state = Arc::new(RwLock::new(SimulationState {
+        status: SimStatus::Idle,
+        agents: HashMap::new(),
+        agent_states: HashMap::new(),
+        world: WorldState::new(chrono::Utc::now()),
+        config: config.clone(),
+        total_actions: 0,
+        syntheses: Vec::new(),
+    }));
+
+    let (ws_tx, _) = broadcast::channel::<engine::WsEvent>(1024);
+    let (god_eye_tx, _god_eye_rx) = mpsc::channel(100);
+    let (pause_tx, _pause_rx) = mpsc::channel(1);
+    let (resume_tx, _resume_rx) = mpsc::channel(1);
+    let (stop_tx, _stop_rx) = mpsc::channel(1);
+
+    let controls = Arc::new(RwLock::new(EngineControls {
+        pause_tx,
+        resume_tx,
+        stop_tx,
+        god_eye_tx,
+    }));
+
+    let web_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .join("web")
+        .to_string_lossy()
+        .to_string();
+
+    let app_state = server::AppState {
+        sim_state: state,
+        controls,
+        ws_tx,
+        llm,
+        base_config: Arc::new(config.clone()),
+    };
+
+    println!("Server mode — launch simulations from the Web UI");
+    println!("  http://{}:{}", config.server.host, config.server.port);
+
+    server::start(
+        &config.server.host,
+        config.server.port,
+        app_state,
+        &web_dir,
+        false,
+    )
+    .await
 }
 
 async fn cmd_run(
@@ -284,6 +355,7 @@ async fn cmd_run(
         world: WorldState::new(chrono::Utc::now()),
         config: config.clone(),
         total_actions: 0,
+        syntheses: Vec::new(),
     }));
 
     // --- Phase 3: Setup channels ---
@@ -293,13 +365,12 @@ async fn cmd_run(
     let (resume_tx, resume_rx) = mpsc::channel(1);
     let (stop_tx, stop_rx) = mpsc::channel(1);
 
-    let controls = Arc::new(EngineControls {
+    let controls = Arc::new(RwLock::new(EngineControls {
         pause_tx,
         resume_tx,
         stop_tx,
         god_eye_tx: god_eye_tx.clone(),
-        ws_tx: ws_tx.clone(),
-    });
+    }));
 
     // --- Phase 4: Start God's Eye file watcher ---
     if config.god_eye.enabled {
@@ -324,6 +395,9 @@ async fn cmd_run(
         let server_state = server::AppState {
             sim_state: state.clone(),
             controls: controls.clone(),
+            ws_tx: ws_tx.clone(),
+            llm: llm.clone(),
+            base_config: Arc::new(config.clone()),
         };
         let host = config.server.host.clone();
         let port = config.server.port;
@@ -369,6 +443,13 @@ async fn cmd_run(
     println!("\nSimulation complete.");
     println!("  Actions log: {}", config.output.output_dir.join(&config.output.action_log).display());
     println!("  Report: {report_path}");
+
+    // Keep web server alive after simulation so users can explore results
+    if config.server.enabled {
+        println!("  Web UI still running at http://{}:{} — press Ctrl+C to stop.", config.server.host, config.server.port);
+        tokio::signal::ctrl_c().await.ok();
+        println!("\nShutting down.");
+    }
 
     Ok(())
 }

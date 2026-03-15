@@ -96,6 +96,20 @@ impl AgentProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Action log entry (lightweight version for agent history)
+// ---------------------------------------------------------------------------
+
+const MAX_ACTION_LOG: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionLogEntry {
+    pub round: u32,
+    pub action_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Agent State (mutable during simulation)
 // ---------------------------------------------------------------------------
 
@@ -107,6 +121,7 @@ pub struct AgentState {
     pub post_ids: Vec<Uuid>,
     pub liked_post_ids: Vec<Uuid>,
     pub memory: AgentMemory,
+    pub action_log: Vec<ActionLogEntry>,
 }
 
 impl AgentState {
@@ -118,7 +133,15 @@ impl AgentState {
             post_ids: Vec::new(),
             liked_post_ids: Vec::new(),
             memory: AgentMemory::new(20, 5),
+            action_log: Vec::new(),
         }
+    }
+
+    pub fn log_action(&mut self, entry: ActionLogEntry) {
+        if self.action_log.len() >= MAX_ACTION_LOG {
+            self.action_log.remove(0);
+        }
+        self.action_log.push(entry);
     }
 }
 

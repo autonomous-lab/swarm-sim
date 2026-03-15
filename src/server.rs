@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -7,14 +8,16 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{self, CorsLayer};
 use tower_http::services::ServeDir;
 use uuid::Uuid;
 
 use crate::agent::Tier;
-use crate::engine::{EngineControls, SharedState, WsEvent};
-use crate::llm::PostSummary;
+use crate::config::SimConfig;
+use crate::engine::{EngineControls, SharedState, SimStatus, WsEvent};
+use crate::launcher::{self, LaunchRequest};
+use crate::llm::{LlmClient, PostSummary};
 use crate::world::InjectedEvent;
 
 // ---------------------------------------------------------------------------
@@ -24,7 +27,10 @@ use crate::world::InjectedEvent;
 #[derive(Clone)]
 pub struct AppState {
     pub sim_state: SharedState,
-    pub controls: Arc<EngineControls>,
+    pub controls: Arc<RwLock<EngineControls>>,
+    pub ws_tx: broadcast::Sender<WsEvent>,
+    pub llm: Arc<LlmClient>,
+    pub base_config: Arc<SimConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -35,9 +41,8 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
     let cors = if cors_permissive {
         CorsLayer::permissive()
     } else {
-        // Restrict to same-origin by default — only allow localhost origins
         CorsLayer::new()
-            .allow_origin(cors::Any) // Static files are served from same origin; API is same-origin
+            .allow_origin(cors::Any)
             .allow_methods([
                 axum::http::Method::GET,
                 axum::http::Method::POST,
@@ -55,9 +60,12 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/trending", get(get_trending))
         .route("/api/timeline", get(get_timeline))
         .route("/api/graph", get(get_graph))
+        .route("/api/dashboard", get(get_dashboard))
+        .route("/api/syntheses", get(get_syntheses))
         .route("/api/simulation/pause", post(pause_simulation))
         .route("/api/simulation/resume", post(resume_simulation))
         .route("/api/simulation/stop", post(stop_simulation))
+        .route("/api/simulation/launch", post(launch_simulation))
         .route("/api/god-eye/inject", post(inject_event))
         // WebSocket
         .route("/ws", get(ws_handler))
@@ -130,7 +138,6 @@ async fn get_agents(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
 
-    // Sort: Tier1 first, then by follower count
     agents.sort_by(|a, b| {
         a.tier
             .to_string()
@@ -311,22 +318,197 @@ async fn get_graph(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct DashboardData {
+    stance_distribution: HashMap<String, usize>,
+    tier_distribution: HashMap<String, usize>,
+    activity_per_round: Vec<RoundActivity>,
+    top_agents: Vec<TopAgent>,
+    total_posts: usize,
+    total_actions: usize,
+    total_agents: usize,
+}
+
+#[derive(Serialize)]
+struct RoundActivity {
+    round: u32,
+    posts: usize,
+    replies: usize,
+    likes: usize,
+    active_agents: usize,
+}
+
+#[derive(Serialize)]
+struct TopAgent {
+    username: String,
+    tier: String,
+    post_count: usize,
+    follower_count: usize,
+    stance: String,
+}
+
+async fn get_dashboard(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+
+    let mut stance_distribution: HashMap<String, usize> = HashMap::new();
+    let mut tier_distribution: HashMap<String, usize> = HashMap::new();
+
+    for agent in s.agents.values() {
+        *stance_distribution.entry(agent.stance.to_string()).or_insert(0) += 1;
+        let tier_label = match agent.tier {
+            Tier::Tier1 => "VIP",
+            Tier::Tier2 => "Standard",
+            Tier::Tier3 => "Figurant",
+        };
+        *tier_distribution.entry(tier_label.to_string()).or_insert(0) += 1;
+    }
+
+    let activity_per_round: Vec<RoundActivity> = s
+        .world
+        .round_summaries
+        .iter()
+        .map(|rs| RoundActivity {
+            round: rs.round,
+            posts: rs.new_posts,
+            replies: rs.new_replies,
+            likes: rs.new_likes,
+            active_agents: rs.active_agents,
+        })
+        .collect();
+
+    let mut top_agents: Vec<TopAgent> = s
+        .agents
+        .values()
+        .map(|a| {
+            let post_count = s
+                .agent_states
+                .get(&a.id)
+                .map(|st| st.post_ids.len())
+                .unwrap_or(0);
+            let follower_count = s.world.social_graph.follower_count(&a.id);
+            TopAgent {
+                username: a.username.clone(),
+                tier: match a.tier {
+                    Tier::Tier1 => "VIP".to_string(),
+                    Tier::Tier2 => "Standard".to_string(),
+                    Tier::Tier3 => "Figurant".to_string(),
+                },
+                post_count,
+                follower_count,
+                stance: a.stance.to_string(),
+            }
+        })
+        .collect();
+    top_agents.sort_by(|a, b| (b.post_count + b.follower_count).cmp(&(a.post_count + a.follower_count)));
+    top_agents.truncate(10);
+
+    Json(DashboardData {
+        stance_distribution,
+        tier_distribution,
+        activity_per_round,
+        top_agents,
+        total_posts: s.world.posts.len(),
+        total_actions: s.total_actions,
+        total_agents: s.agents.len(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Syntheses endpoint
+// ---------------------------------------------------------------------------
+
+async fn get_syntheses(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let syntheses: Vec<serde_json::Value> = s
+        .syntheses
+        .iter()
+        .map(|(round, text)| {
+            serde_json::json!({ "round": round, "text": text })
+        })
+        .collect();
+    Json(syntheses)
+}
+
+// ---------------------------------------------------------------------------
 // Simulation control
 // ---------------------------------------------------------------------------
 
 async fn pause_simulation(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.controls.pause_tx.send(()).await;
+    let controls = state.controls.read().await;
+    let _ = controls.pause_tx.send(()).await;
     Json(serde_json::json!({"status": "paused"}))
 }
 
 async fn resume_simulation(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.controls.resume_tx.send(()).await;
+    let controls = state.controls.read().await;
+    let _ = controls.resume_tx.send(()).await;
     Json(serde_json::json!({"status": "resumed"}))
 }
 
 async fn stop_simulation(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.controls.stop_tx.send(()).await;
+    let controls = state.controls.read().await;
+    let _ = controls.stop_tx.send(()).await;
     Json(serde_json::json!({"status": "stopping"}))
+}
+
+// ---------------------------------------------------------------------------
+// Launch simulation from UI
+// ---------------------------------------------------------------------------
+
+async fn launch_simulation(
+    State(state): State<AppState>,
+    Json(req): Json<LaunchRequest>,
+) -> impl IntoResponse {
+    // Check current status
+    {
+        let s = state.sim_state.read().await;
+        match s.status {
+            SimStatus::Running | SimStatus::Preparing => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error": "Simulation already running. Stop it first."})),
+                )
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
+
+    // Validate request
+    if req.scenario_prompt.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "scenario_prompt is required"})),
+        )
+            .into_response();
+    }
+
+    match launcher::launch_simulation(
+        req,
+        &state.base_config,
+        state.llm.clone(),
+        state.sim_state.clone(),
+        state.ws_tx.clone(),
+    )
+    .await
+    {
+        Ok(new_controls) => {
+            let mut controls = state.controls.write().await;
+            *controls = new_controls;
+            Json(serde_json::json!({"status": "launched"})).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Launch failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Launch failed: {e}")})),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +527,6 @@ async fn inject_event(
     State(state): State<AppState>,
     Json(req): Json<InjectRequest>,
 ) -> impl IntoResponse {
-    // Limit event content size to prevent abuse
     if req.content.len() > 10_000 {
         return (
             StatusCode::BAD_REQUEST,
@@ -376,7 +557,8 @@ async fn inject_event(
         processed: false,
     };
 
-    match state.controls.god_eye_tx.send(event.clone()).await {
+    let controls = state.controls.read().await;
+    match controls.god_eye_tx.send(event.clone()).await {
         Ok(_) => Json(serde_json::json!({"status": "injected", "event_id": event.id})).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -398,7 +580,8 @@ async fn ws_handler(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
-    let mut rx = state.controls.ws_tx.subscribe();
+    // Subscribe to the persistent ws_tx (survives sim restarts)
+    let mut rx = state.ws_tx.subscribe();
 
     // Send current status on connect
     {
@@ -432,7 +615,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    _ => {} // Ignore client messages for now
+                    _ => {}
                 }
             }
         }

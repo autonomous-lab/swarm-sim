@@ -6,7 +6,7 @@ use rand::Rng;
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::{AgentProfile, AgentState, Tier};
+use crate::agent::{ActionLogEntry, AgentProfile, AgentState, Tier};
 use crate::config::SimConfig;
 use crate::llm::{self, LlmClient, PostSummary};
 use crate::output::{self, ActionLogger};
@@ -34,6 +34,7 @@ pub struct SimSnapshot {
     pub total_agents: usize,
     pub total_actions: usize,
     pub total_posts: usize,
+    pub scenario_prompt: String,
 }
 
 pub type SharedState = Arc<RwLock<SimulationState>>;
@@ -46,6 +47,7 @@ pub struct SimulationState {
     pub world: WorldState,
     pub config: SimConfig,
     pub total_actions: usize,
+    pub syntheses: Vec<(u32, String)>,
 }
 
 impl SimulationState {
@@ -57,6 +59,7 @@ impl SimulationState {
             total_agents: self.agents.len(),
             total_actions: self.total_actions,
             total_posts: self.world.posts.len(),
+            scenario_prompt: self.config.simulation.scenario_prompt.clone(),
         }
     }
 }
@@ -78,6 +81,8 @@ pub enum WsEvent {
     GodEyeInject { event: InjectedEvent },
     #[serde(rename = "trending_update")]
     TrendingUpdate { posts: Vec<PostSummary> },
+    #[serde(rename = "synthesis")]
+    Synthesis { round: u32, text: String },
     #[serde(rename = "simulation_end")]
     SimulationEnd { total_rounds: u32, total_actions: usize },
 }
@@ -103,7 +108,6 @@ pub struct EngineControls {
     pub resume_tx: mpsc::Sender<()>,
     pub stop_tx: mpsc::Sender<()>,
     pub god_eye_tx: mpsc::Sender<InjectedEvent>,
-    pub ws_tx: broadcast::Sender<WsEvent>,
 }
 
 impl SimulationEngine {
@@ -186,6 +190,21 @@ impl SimulationEngine {
             {
                 let mut s = self.state.write().await;
                 s.world.round_summaries.push(summary);
+            }
+
+            // Generate synthesis if needed
+            if config.synthesis.enabled
+                && round > 0
+                && round % config.synthesis.every_n_rounds == 0
+            {
+                if let Some(text) = self.generate_synthesis(round, &config).await {
+                    let _ = self.ws_tx.send(WsEvent::Synthesis {
+                        round,
+                        text: text.clone(),
+                    });
+                    let mut s = self.state.write().await;
+                    s.syntheses.push((round, text));
+                }
             }
 
             logger.flush()?;
@@ -491,6 +510,83 @@ impl SimulationEngine {
         }
 
         all_actions
+    }
+
+    async fn generate_synthesis(&self, round: u32, config: &SimConfig) -> Option<String> {
+        let s = self.state.read().await;
+        let scenario = &config.simulation.scenario_prompt;
+        let total_actions = s.total_actions;
+        let total_posts = s.world.posts.len();
+        let agent_count = s.agents.len();
+
+        let trending = s.world.trending(5, 10);
+        let trending_text: Vec<String> = trending
+            .iter()
+            .map(|p| {
+                format!(
+                    "- @{}: \"{}\" ({} likes, {} replies)",
+                    p.author_name,
+                    p.content.chars().take(100).collect::<String>(),
+                    p.likes.len(),
+                    p.replies.len()
+                )
+            })
+            .collect();
+
+        let recent_summaries: Vec<String> = s
+            .world
+            .round_summaries
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .map(|rs| {
+                format!(
+                    "R{}: {} agents, {} posts, {} replies, {} likes",
+                    rs.round, rs.active_agents, rs.new_posts, rs.new_replies, rs.new_likes
+                )
+            })
+            .collect();
+
+        let mut stances: HashMap<String, u32> = HashMap::new();
+        for agent in s.agents.values() {
+            *stances.entry(agent.stance.to_string()).or_insert(0) += 1;
+        }
+        let stance_text: Vec<String> = stances.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+
+        drop(s);
+
+        let system = "You are a concise analyst summarizing a social media simulation. Write 2-3 short paragraphs analyzing current dynamics, emerging narratives, and notable trends. Be specific about agent behaviors and sentiment shifts. No markdown headers.".to_string();
+
+        let user = format!(
+            "Scenario: {scenario}\n\n\
+             Round {round}/{total_rounds}\n\
+             Agents: {agent_count} | Posts: {total_posts} | Total actions: {total_actions}\n\n\
+             Stance distribution: {stances}\n\n\
+             Recent activity:\n{recent}\n\n\
+             Trending posts:\n{trending}\n\n\
+             Provide a brief narrative analysis of the simulation so far.",
+            total_rounds = config.simulation.total_rounds,
+            stances = stance_text.join(", "),
+            recent = recent_summaries.join("\n"),
+            trending = trending_text.join("\n"),
+        );
+
+        match self.llm.call_tier(Tier::Tier2, &system, &user).await {
+            Ok(text) => {
+                let clean = text.trim().to_string();
+                if clean.is_empty() {
+                    None
+                } else {
+                    tracing::info!("Synthesis generated for round {round}");
+                    Some(clean)
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Synthesis generation failed: {e}");
+                None
+            }
+        }
     }
 
     async fn inject_event(&self, event: &InjectedEvent) {
@@ -975,6 +1071,23 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
             agent_state
                 .memory
                 .observe(action.round, describe_action(action));
+        }
+    }
+
+    // Log to agent's action history
+    if !matches!(action.action_type, ActionType::DoNothing) {
+        if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
+            agent_state.log_action(ActionLogEntry {
+                round: action.round,
+                action_type: action.action_type.to_string(),
+                content: action.content.as_ref().map(|c| {
+                    if c.len() > 200 {
+                        format!("{}...", &c[..200])
+                    } else {
+                        c.clone()
+                    }
+                }),
+            });
         }
     }
 }

@@ -17,6 +17,8 @@ pub struct SimConfig {
     pub output: OutputConfig,
     pub server: ServerConfig,
     pub god_eye: GodEyeConfig,
+    #[serde(default)]
+    pub synthesis: SynthesisConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +123,26 @@ pub struct GodEyeConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct SynthesisConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_synthesis_interval")]
+    pub every_n_rounds: u32,
+    #[serde(default = "default_synthesis_tokens")]
+    pub max_tokens: u32,
+}
+
+impl Default for SynthesisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            every_n_rounds: 3,
+            max_tokens: 1024,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
@@ -144,6 +166,8 @@ fn default_port() -> u16 { 3000 }
 fn default_events_file() -> PathBuf { PathBuf::from("./events.toml") }
 fn default_debounce() -> u64 { 500 }
 fn default_true() -> bool { true }
+fn default_synthesis_interval() -> u32 { 3 }
+fn default_synthesis_tokens() -> u32 { 1024 }
 
 // ---------------------------------------------------------------------------
 // Loading
