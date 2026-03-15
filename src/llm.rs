@@ -1,13 +1,12 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use crate::agent::{AgentProfile, AgentState, Tier};
+use crate::agent::{AgentProfile, Stance, Tier};
 use crate::config::{TierConfig, TierSettings};
-use crate::world::{Action, ActionType, Post};
+use crate::world::{Post, ReplyCandidate};
 
 // ---------------------------------------------------------------------------
 // LLM client
@@ -19,6 +18,8 @@ pub struct LlmClient {
     extraction_model: String,
     extraction_base_url: String,
     extraction_api_key: String,
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
 }
 
 impl LlmClient {
@@ -51,6 +52,8 @@ impl LlmClient {
             extraction_model,
             extraction_base_url,
             extraction_api_key,
+            prompt_tokens: AtomicU64::new(0),
+            completion_tokens: AtomicU64::new(0),
         }
     }
 
@@ -76,6 +79,8 @@ impl LlmClient {
             system_prompt,
             user_prompt,
             settings.max_retries,
+            &self.prompt_tokens,
+            &self.completion_tokens,
         )
         .await
     }
@@ -97,8 +102,24 @@ impl LlmClient {
             system_prompt,
             user_prompt,
             3,
+            &self.prompt_tokens,
+            &self.completion_tokens,
         )
         .await
+    }
+
+    /// Get cumulative token usage (prompt_tokens, completion_tokens).
+    pub fn token_usage(&self) -> (u64, u64) {
+        (
+            self.prompt_tokens.load(Ordering::Relaxed),
+            self.completion_tokens.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Reset token counters (e.g., on new simulation launch).
+    pub fn reset_tokens(&self) {
+        self.prompt_tokens.store(0, Ordering::Relaxed);
+        self.completion_tokens.store(0, Ordering::Relaxed);
     }
 }
 
@@ -123,6 +144,16 @@ struct ChatMessage {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<UsageInfo>,
+}
+
+#[derive(Deserialize)]
+struct UsageInfo {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -164,6 +195,8 @@ async fn call_with_retry(
     system_prompt: &str,
     user_prompt: &str,
     max_retries: u32,
+    token_prompt: &AtomicU64,
+    token_completion: &AtomicU64,
 ) -> Result<String> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let body = ChatRequest {
@@ -206,6 +239,10 @@ async fn call_with_retry(
                     }
                     let parsed: ChatResponse = serde_json::from_str(&text)
                         .with_context(|| "Failed to parse LLM response JSON")?;
+                    if let Some(usage) = &parsed.usage {
+                        token_prompt.fetch_add(usage.prompt_tokens, Ordering::Relaxed);
+                        token_completion.fetch_add(usage.completion_tokens, Ordering::Relaxed);
+                    }
                     if let Some(choice) = parsed.choices.first() {
                         let content = strip_think_tags(&choice.message.content);
                         return Ok(content);
@@ -405,49 +442,53 @@ fn fix_truncated_json(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build the system prompt for a single (Tier 1) agent.
-pub fn build_single_system_prompt(agent: &AgentProfile) -> String {
+pub fn build_single_system_prompt(agent: &AgentProfile, current_sentiment: f32) -> String {
+    let (behavior, _action_mix, style) = agent.archetype.prompt_instructions();
+    let runtime_stance = Stance::from_sentiment(current_sentiment);
+    let max_len = agent.archetype.max_post_length();
+
     format!(
-        r#"You are simulating a social media user in a virtual community.
+        r#"You simulate ONE social media user. Write EXACTLY like a real person on Twitter/X — not like an AI.
 
-YOUR IDENTITY:
-Name: {name}
-Username: @{username}
+IDENTITY: @{username} ({name}) | {stance} | sentiment:{sentiment:.1}
 Bio: {bio}
-Persona: {persona}
-Stance: {stance}
-Sentiment: {sentiment:.1} (-1.0=very negative, 1.0=very positive)
 
-INSTRUCTIONS:
-Based on your feed, trending content, and recent events, decide what to do this round.
-You may take 0-3 actions. Stay in character.
+VOICE: {behavior}
+STYLE: {style}
+HARD LIMIT: {max_len} characters per post. Posts exceeding this are INVALID.
 
-AVAILABLE ACTIONS:
-- create_post: Write an original post. Include "content" field.
-- reply: Reply to a post. Include "target_post_id" and "content" fields.
-- like: Like a post. Include "target_post_id" field.
-- repost: Repost someone's post. Include "target_post_id" field.
-- follow: Follow a user. Include "target_agent_id" field.
-- do_nothing: Skip this round.
-- pin_memory: Mark something important to remember. Include "content" field.
+RULES:
+- Write like this person would ACTUALLY tweet. No corporate speak. No essay structure.
+- You are LIVING through this event right now. React emotionally, not like a commentator analyzing from outside.
+- NEVER repeat phrases you see in the feed or that you said before. Make a NEW unique point each round.
+- Prefer replying to posts in your feed over creating new posts.
+- Use exact post UUIDs when replying/liking/reposting.
+- You may take 0-3 actions.
+- NO hashtags (unless you are an activist, then max 1). Real people rarely use hashtags.
+- Use contractions (don't, can't, it's). Use lowercase when casual. Real tweets are messy.
 
-Respond with ONLY valid JSON (no markdown, no explanation):
+ACTIONS:
+- create_post: "content" field
+- reply: "target_post_id" + "content"
+- like: "target_post_id"
+- repost: "target_post_id"
+- follow: "target_agent_id"
+- do_nothing: skip
+
+JSON ONLY (pin_memory is optional — only include if you want to remember something specific):
 {{
-  "reasoning": "Brief internal monologue",
-  "actions": [
-    {{"action_type": "...", "content": "...", "target_post_id": "...", "target_agent_id": "..."}}
-  ],
-  "pin_memory": "optional important observation"
+  "reasoning": "brief thought",
+  "actions": [{{"action_type":"...","content":"...","target_post_id":"...","target_agent_id":"..."}}]
 }}"#,
-        name = agent.name,
         username = agent.username,
+        name = agent.name,
         bio = agent.bio,
-        persona = agent.persona,
-        stance = agent.stance,
-        sentiment = agent.sentiment_bias,
+        stance = runtime_stance,
+        sentiment = current_sentiment,
     )
 }
 
-/// Build the user prompt for a single agent (feed + trending + events + memory).
+/// Build the user prompt for a single agent (feed + trending + reply targets + events + memory).
 pub fn build_single_user_prompt(
     round: u32,
     total_rounds: u32,
@@ -455,6 +496,7 @@ pub fn build_single_user_prompt(
     memory_text: &str,
     feed_posts: &[PostSummary],
     trending_posts: &[PostSummary],
+    reply_candidates: &[ReplyCandidate],
     events: &[String],
 ) -> String {
     let mut parts = Vec::new();
@@ -472,7 +514,7 @@ pub fn build_single_user_prompt(
         for p in feed_posts {
             parts.push(format!(
                 "  [{id}] @{author}: {content}\n    Likes:{likes} Replies:{replies} | {age}r ago",
-                id = p.short_id,
+                id = p.post_id,
                 author = p.author,
                 content = p.content_preview,
                 likes = p.likes,
@@ -482,13 +524,28 @@ pub fn build_single_user_prompt(
         }
     }
 
+    if !reply_candidates.is_empty() {
+        parts.push("\nREPLY TARGETS (consider engaging with these):".into());
+        for rc in reply_candidates {
+            parts.push(format!(
+                "  [{id}] @{author}: \"{content}\" ({eng:.0} engagement)\n    → {reason}",
+                id = rc.post_id,
+                author = rc.author_name,
+                content = rc.content_preview,
+                eng = rc.engagement,
+                reason = rc.reason,
+            ));
+        }
+        parts.push("IMPORTANT: When replying, use the exact post UUID as target_post_id. Don't just create new posts — react to what's happening.".into());
+    }
+
     if !trending_posts.is_empty() {
         parts.push("\nTRENDING:".into());
         for (i, p) in trending_posts.iter().enumerate() {
             parts.push(format!(
                 "  #{} [{id}] @{author}: {content} (engagement:{eng:.0})",
                 i + 1,
-                id = p.short_id,
+                id = p.post_id,
                 author = p.author,
                 content = p.content_preview,
                 eng = p.engagement,
@@ -507,44 +564,67 @@ pub fn build_single_user_prompt(
 }
 
 /// Build the system prompt for a batch of agents (Tier 2/3).
-pub fn build_batch_system_prompt(agents: &[(AgentProfile, String)], persona_max_chars: usize) -> String {
+pub fn build_batch_system_prompt(
+    agents: &[(AgentProfile, String, f32)],
+    persona_max_chars: usize,
+) -> String {
     let mut agent_descs = String::new();
-    for (agent, memory_short) in agents {
+    for (agent, memory_short, sentiment) in agents {
+        let (_behavior, _action_mix, style) = agent.archetype.prompt_instructions();
+        let runtime_stance = Stance::from_sentiment(*sentiment);
         agent_descs.push_str(&format!(
-            "---\nID: {id}\nName: @{username} ({name})\nBio: {bio}\nPersona: {persona}\nStance: {stance}\nMemory: {memory}\n",
+            "---\n[{id}] @{username} | {stance} | {archetype}\n{persona}\nSTYLE: {style}\nMemory: {memory}\n",
             id = &agent.id.to_string()[..8],
             username = agent.username,
-            name = agent.name,
-            bio = agent.bio,
             persona = agent.persona_truncated(persona_max_chars),
-            stance = agent.stance,
+            stance = runtime_stance,
+            archetype = agent.archetype,
             memory = memory_short,
         ));
     }
 
     format!(
-        r#"You are simulating {n} social media users simultaneously.
-Each user has their own personality. Generate actions for ALL of them.
+        r#"Simulate {n} Twitter/X users. Each has a DIFFERENT voice. This is NOT an essay contest — it's messy, emotional, raw Twitter.
 
-USERS IN THIS BATCH:
+These people are LIVING through this event RIGHT NOW. They are not commentators analyzing from the outside. They are personally affected, scared, angry, amused, confused, or opportunistic.
+
+STYLE RULES:
+- Lurkers: 1-5 words ONLY. Mostly just like/repost. No hashtags.
+- Normies: 1-2 casual sentences. Abbreviations (lol, tbh, ngl, idk, bruh, omg). NO analysis. No hashtags.
+- Shitposters: 1 sarcastic sentence. Deadpan humor, absurd comparisons. No hashtags.
+- Cheerleaders: 1-2 excited sentences. Exclamation marks. No hashtags.
+- Provocateurs: 1-2 aggressive sentences. Disagree, challenge, mock. No hashtags.
+- Journalists: 2-3 sentences, news framing, probing questions. No hashtags.
+- Analysts: 2-4 sentences with data/specifics. No hashtags.
+- Activists: 2-3 sentences, calls to action. MAX 1 hashtag (organic, specific to topic).
+
+HASHTAG RULE: Almost NO ONE should use hashtags. Only activists may use MAX 1 per post. Everyone else: ZERO hashtags.
+
+LANGUAGE RULE: Use contractions (don't, can't, it's, they're). Use lowercase when casual. Real tweets are messy and imperfect.
+
+ANTI-REPETITION (CRITICAL):
+- Each user MUST say something UNIQUE. NO two users can make the same point.
+- NEVER copy phrases or arguments from another user in this batch.
+- Check each user's Memory field — they must say something DIFFERENT from previous rounds.
+- Vary reactions: not everyone reacts the same way. Some agree, some disagree, some joke, some panic.
+
+Most users should like/repost/reply — NOT everyone needs to create_post.
+Use exact post UUIDs for reply/like/repost.
+
+USERS:
 {agent_descs}
-AVAILABLE ACTIONS (per user, 0-2 actions each):
-- create_post: Include "content"
-- reply: Include "target_post_id" and "content"
-- like: Include "target_post_id"
-- repost: Include "target_post_id"
-- follow: Include "target_agent_id"
+ACTIONS (0-2 per user):
+- create_post: "content"
+- reply: "target_post_id" + "content"
+- like: "target_post_id"
+- repost: "target_post_id"
+- follow: "target_agent_id"
 - do_nothing: skip
 
-Respond with ONLY valid JSON (no markdown):
+JSON ONLY (pin_memory field is optional — omit it or set to null if nothing to pin):
 {{
   "agent_actions": [
-    {{
-      "agent_id": "ID",
-      "reasoning": "brief",
-      "actions": [{{"action_type": "...", ...}}],
-      "pin_memory": "optional"
-    }}
+    {{"agent_id":"ID","reasoning":"brief","actions":[{{"action_type":"...","content":"...","target_post_id":"...","target_agent_id":"..."}}]}}
   ]
 }}"#,
         n = agents.len(),
@@ -572,7 +652,7 @@ pub fn build_batch_user_prompt(
         for p in feed_posts.iter().take(10) {
             parts.push(format!(
                 "  [{id}] @{author}: {content} (L:{likes} R:{replies})",
-                id = p.short_id,
+                id = p.post_id,
                 author = p.author,
                 content = p.content_preview,
                 likes = p.likes,
@@ -617,6 +697,7 @@ pub fn build_batch_user_prompt(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostSummary {
+    pub post_id: String,
     pub short_id: String,
     pub author: String,
     pub content_preview: String,
@@ -634,6 +715,7 @@ impl PostSummary {
             post.content.clone()
         };
         Self {
+            post_id: post.id.to_string(),
             short_id: post.short_id(),
             author: post.author_name.clone(),
             content_preview: preview,

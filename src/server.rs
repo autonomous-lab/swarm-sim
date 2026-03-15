@@ -66,6 +66,7 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/simulation/resume", post(resume_simulation))
         .route("/api/simulation/stop", post(stop_simulation))
         .route("/api/simulation/launch", post(launch_simulation))
+        .route("/api/simulation/continue", post(continue_simulation))
         .route("/api/god-eye/inject", post(inject_event))
         // WebSocket
         .route("/ws", get(ws_handler))
@@ -505,6 +506,74 @@ async fn launch_simulation(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("Launch failed: {e}")})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Continue simulation
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ContinueRequest {
+    extra_rounds: u32,
+}
+
+async fn continue_simulation(
+    State(state): State<AppState>,
+    Json(req): Json<ContinueRequest>,
+) -> impl IntoResponse {
+    // Must be finished to continue
+    {
+        let s = state.sim_state.read().await;
+        match s.status {
+            SimStatus::Finished => {}
+            SimStatus::Running | SimStatus::Preparing => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error": "Simulation is still running."})),
+                )
+                    .into_response();
+            }
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "No finished simulation to continue."})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if req.extra_rounds == 0 || req.extra_rounds > 100 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "extra_rounds must be between 1 and 100"})),
+        )
+            .into_response();
+    }
+
+    match launcher::continue_simulation(
+        req.extra_rounds,
+        state.sim_state.clone(),
+        state.llm.clone(),
+        state.ws_tx.clone(),
+    )
+    .await
+    {
+        Ok(new_controls) => {
+            let mut controls = state.controls.write().await;
+            *controls = new_controls;
+            Json(serde_json::json!({"status": "continuing", "extra_rounds": req.extra_rounds}))
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Continue failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Continue failed: {e}")})),
             )
                 .into_response()
         }

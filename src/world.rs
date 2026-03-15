@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::agent::Tier;
+use crate::agent::{Stance, Tier};
 
 // ---------------------------------------------------------------------------
 // Action types
@@ -247,7 +247,7 @@ impl WorldState {
                 let followed = if following.contains(&post.author_id) {
                     1.0
                 } else {
-                    0.0
+                    0.2 // Non-followed content still gets baseline visibility
                 };
 
                 let score = recency_w as f64 * recency
@@ -261,6 +261,100 @@ impl WorldState {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(feed_size);
         scored.into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Build reply candidates: posts the agent should consider engaging with.
+    /// Returns posts that are stance-opposing, viral, or from followed users.
+    pub fn build_reply_candidates(
+        &self,
+        agent_id: &Uuid,
+        agent_stance: &Stance,
+        max_candidates: usize,
+    ) -> Vec<ReplyCandidate> {
+        let following = self
+            .social_graph
+            .following
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let recent_posts: Vec<&Post> = self
+            .posts
+            .values()
+            .filter(|p| {
+                p.author_id != *agent_id
+                    && p.reply_to.is_none()
+                    && self.current_round.saturating_sub(p.created_at_round) <= 3
+            })
+            .collect();
+
+        let mut candidates: Vec<ReplyCandidate> = Vec::new();
+
+        for post in &recent_posts {
+            let content_lower = post.content.to_lowercase();
+
+            // Check stance opposition using keyword heuristics
+            let is_opposing = match agent_stance {
+                Stance::Supportive => {
+                    content_lower.contains("greed") || content_lower.contains("scam")
+                        || content_lower.contains("disaster") || content_lower.contains("betrayal")
+                        || content_lower.contains("terrible") || content_lower.contains("worst")
+                        || content_lower.contains("outrage") || content_lower.contains("unacceptable")
+                }
+                Stance::Opposing => {
+                    content_lower.contains("innovation") || content_lower.contains("progress")
+                        || content_lower.contains("opportunity") || content_lower.contains("great")
+                        || content_lower.contains("exciting") || content_lower.contains("brilliant")
+                        || content_lower.contains("impressive") || content_lower.contains("support")
+                }
+                _ => false,
+            };
+
+            let is_viral = post.engagement_score() > 5.0;
+            let is_followed = following.contains(&post.author_id);
+            let has_few_replies = post.replies.len() < 3;
+
+            if is_opposing {
+                candidates.push(ReplyCandidate {
+                    post_id: post.id,
+                    author_name: post.author_name.clone(),
+                    content_preview: post.content.chars().take(100).collect(),
+                    engagement: post.engagement_score(),
+                    reason: "DISAGREES with your stance. Push back or engage.".into(),
+                });
+            } else if is_viral {
+                candidates.push(ReplyCandidate {
+                    post_id: post.id,
+                    author_name: post.author_name.clone(),
+                    content_preview: post.content.chars().take(100).collect(),
+                    engagement: post.engagement_score(),
+                    reason: "VIRAL post. Engaging increases your visibility.".into(),
+                });
+            } else if is_followed && has_few_replies {
+                candidates.push(ReplyCandidate {
+                    post_id: post.id,
+                    author_name: post.author_name.clone(),
+                    content_preview: post.content.chars().take(100).collect(),
+                    engagement: post.engagement_score(),
+                    reason: "From someone you follow. Join the conversation.".into(),
+                });
+            }
+        }
+
+        // Sort: opposing first, then viral, then followed
+        candidates.sort_by(|a, b| {
+            let a_priority = if a.reason.contains("DISAGREES") { 0 }
+                else if a.reason.contains("VIRAL") { 1 }
+                else { 2 };
+            let b_priority = if b.reason.contains("DISAGREES") { 0 }
+                else if b.reason.contains("VIRAL") { 1 }
+                else { 2 };
+            a_priority.cmp(&b_priority)
+                .then(b.engagement.partial_cmp(&a.engagement).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        candidates.truncate(max_candidates);
+        candidates
     }
 
     /// Top posts by engagement in last `lookback` rounds.
@@ -311,4 +405,17 @@ impl WorldState {
             original.reposts.push(repost_id);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reply candidate for discourse injection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyCandidate {
+    pub post_id: Uuid,
+    pub author_name: String,
+    pub content_preview: String,
+    pub engagement: f64,
+    pub reason: String,
 }

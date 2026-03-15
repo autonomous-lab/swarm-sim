@@ -10,6 +10,7 @@ let feedActions = [];
 let roundSummaries = [];
 let syntheses = [];
 let stats = { posts: 0, likes: 0, replies: 0, reposts: 0, actions: 0 };
+let tokenUsage = { prompt: 0, completion: 0 };
 let currentStatus = 'idle';
 let synthesisCollapsed = false;
 
@@ -60,6 +61,9 @@ function handleWsMessage(msg) {
     case 'simulation_end':
       handleSimEnd(msg);
       break;
+    case 'status_update':
+      updateStatus(msg);
+      break;
     default:
       // Initial status snapshot
       if (msg.status !== undefined) {
@@ -109,6 +113,13 @@ function handleRoundEnd(msg) {
   document.getElementById('round-info').textContent =
     `Round ${msg.round}/${document.getElementById('round-info').dataset.total || '?'}`;
 
+  // Update token counts
+  if (msg.prompt_tokens !== undefined) {
+    tokenUsage.prompt = msg.prompt_tokens;
+    tokenUsage.completion = msg.completion_tokens || 0;
+    updateTokenDisplay();
+  }
+
   if (currentTab === 'timeline') refreshTimeline();
   if (currentTab === 'dashboard') refreshDashboard();
   refreshTrending();
@@ -129,7 +140,8 @@ function handleSimEnd(msg) {
   updateStatusBadge('finished');
   document.getElementById('btn-pause').disabled = true;
   document.getElementById('btn-stop').disabled = true;
-  updateLaunchPanelVisibility();
+  updateNewSimButton();
+  updateContinueVisibility();
   if (currentTab === 'dashboard') refreshDashboard();
 }
 
@@ -170,6 +182,13 @@ function updateStatus(snap) {
   document.getElementById('btn-resume').disabled = !isPaused;
   document.getElementById('btn-stop').disabled = !isRunning && !isPaused;
 
+  // Update token counts
+  if (snap.prompt_tokens !== undefined) {
+    tokenUsage.prompt = snap.prompt_tokens;
+    tokenUsage.completion = snap.completion_tokens || 0;
+    updateTokenDisplay();
+  }
+
   // Show scenario banner
   if (snap.scenario_prompt) {
     const banner = document.getElementById('scenario-banner');
@@ -177,7 +196,8 @@ function updateStatus(snap) {
     banner.classList.remove('hidden');
   }
 
-  updateLaunchPanelVisibility();
+  updateNewSimButton();
+  updateContinueVisibility();
 }
 
 function updateStatusBadge(status) {
@@ -194,19 +214,35 @@ function updateStats() {
   document.getElementById('stat-actions').textContent = stats.actions;
 }
 
+function formatTokenCount(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function updateTokenDisplay() {
+  const total = tokenUsage.prompt + tokenUsage.completion;
+  const el = document.getElementById('token-count');
+  el.textContent = `${formatTokenCount(total)} tokens`;
+  el.title = `Prompt: ${tokenUsage.prompt.toLocaleString()} | Completion: ${tokenUsage.completion.toLocaleString()} | Total: ${total.toLocaleString()}`;
+}
+
 // ----------------------------------------------------------------
-// Launch panel visibility
+// Launch modal
 // ----------------------------------------------------------------
 
-function updateLaunchPanelVisibility() {
-  const panel = document.getElementById('launch-panel');
-  const main = document.getElementById('app');
-  if (currentStatus === 'idle' || currentStatus === 'finished') {
-    panel.style.display = 'flex';
-    // Don't hide main — let user browse results while launch panel is visible
-  } else {
-    panel.style.display = 'none';
-  }
+function openLaunchModal() {
+  document.getElementById('launch-modal').classList.add('active');
+}
+
+function closeLaunchModal() {
+  document.getElementById('launch-modal').classList.remove('active');
+}
+
+function updateNewSimButton() {
+  const btn = document.getElementById('btn-new-sim');
+  const isActive = currentStatus === 'running' || currentStatus === 'preparing';
+  btn.disabled = isActive;
 }
 
 // ----------------------------------------------------------------
@@ -342,7 +378,7 @@ async function stopSim() {
   document.getElementById('btn-pause').disabled = true;
   document.getElementById('btn-resume').disabled = true;
   document.getElementById('btn-stop').disabled = true;
-  updateLaunchPanelVisibility();
+  updateNewSimButton();
 }
 
 // ----------------------------------------------------------------
@@ -388,16 +424,20 @@ async function launchSim() {
       roundSummaries = [];
       syntheses = [];
       stats = { posts: 0, likes: 0, replies: 0, reposts: 0, actions: 0 };
+      tokenUsage = { prompt: 0, completion: 0 };
       updateStats();
+      updateTokenDisplay();
       document.getElementById('feed-list').innerHTML = '';
       document.getElementById('synthesis-panel').classList.add('hidden');
 
       currentStatus = 'preparing';
       updateStatusBadge('preparing');
-      updateLaunchPanelVisibility();
+      updateNewSimButton();
 
+      // Close modal after brief success flash
       statusEl.textContent = 'Simulation launched!';
       statusEl.className = 'launch-status success';
+      setTimeout(closeLaunchModal, 800);
 
       // Refresh agents after short delay
       setTimeout(loadAgents, 2000);
@@ -441,6 +481,41 @@ async function injectEvent() {
 }
 
 // ----------------------------------------------------------------
+// Continue simulation
+// ----------------------------------------------------------------
+
+async function continueSim() {
+  const roundsInput = document.getElementById('continue-rounds');
+  const statusEl = document.getElementById('continue-status');
+  const extraRounds = parseInt(roundsInput.value) || 5;
+
+  statusEl.textContent = `Continuing for ${extraRounds} rounds...`;
+  statusEl.className = 'launch-status';
+
+  try {
+    const data = await postJson('/api/simulation/continue', { extra_rounds: extraRounds });
+    if (data.status === 'continuing') {
+      statusEl.textContent = 'Resumed!';
+      statusEl.className = 'launch-status success';
+      setTimeout(() => { statusEl.textContent = ''; }, 2000);
+    } else {
+      statusEl.textContent = data.error || 'Continue failed';
+      statusEl.className = 'launch-status error';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Network error: ' + e.message;
+    statusEl.className = 'launch-status error';
+  }
+}
+
+function updateContinueVisibility() {
+  const section = document.getElementById('continue-section');
+  if (section) {
+    section.style.display = currentStatus === 'finished' ? '' : 'none';
+  }
+}
+
+// ----------------------------------------------------------------
 // Polling (fallback + initial load)
 // ----------------------------------------------------------------
 
@@ -448,6 +523,11 @@ async function initialLoad() {
   try {
     const status = await fetchJson('/api/status');
     updateStatus(status);
+
+    // Auto-open launch modal when server starts idle
+    if (status.status === 'idle') {
+      openLaunchModal();
+    }
 
     // Load existing syntheses
     try {
@@ -469,13 +549,75 @@ async function initialLoad() {
 }
 
 // ----------------------------------------------------------------
+// Example scenarios
+// ----------------------------------------------------------------
+
+const EXAMPLE_SCENARIOS = [
+  {
+    scenario: "Simulate the public reaction on social media after OpenAI announces that GPT-5 will cost $200/month for the Pro tier, while making the free tier significantly more limited. Explore reactions from AI developers, startup founders, students, competitors (Google, Anthropic, Meta), tech journalists, and everyday users debating accessibility, pricing, and the future of AI democratization.",
+    seed: "OpenAI CEO Sam Altman announced today that GPT-5, codenamed \"Orion,\" will launch next month with a new pricing structure. The Pro tier jumps from $20/month to $200/month, offering unlimited GPT-5 access, advanced reasoning, and a 1M token context window. The free tier will be restricted to GPT-4o-mini with 10 messages per day. Altman stated: \"Building frontier AI is extraordinarily expensive. We need sustainable pricing to continue pushing the boundaries.\" The announcement comes as Google DeepMind releases Gemini 3 Ultra for free, and Anthropic offers Claude 4 at $30/month. Tech Twitter erupted immediately, with #OpenAIGreed and #GPT5Pricing trending within hours."
+  },
+  {
+    scenario: "Simulate the social media firestorm after the EU passes a law requiring all AI-generated content to carry a visible watermark and mandatory disclosure. Explore reactions from artists, AI companies, content creators, politicians, journalists, meme accounts, and everyday users debating creativity, censorship, and enforcement.",
+    seed: "The European Parliament voted 421-178 today to pass the AI Transparency Act, requiring all AI-generated images, videos, and text to carry a visible \"AI-Generated\" watermark. Companies have 90 days to comply or face fines up to 6% of global revenue. The law also mandates that social media platforms label AI content automatically. Tech CEOs including Elon Musk and Mark Zuckerberg called it \"the death of innovation in Europe.\" Meanwhile, artists' unions celebrated, calling it \"a first step toward protecting human creativity.\" The hashtags #AIWatermark, #EUvsAI, and #ProtectHumanArt are trending globally."
+  },
+  {
+    scenario: "Simulate the online debate after a leaked internal memo reveals that a major social media platform has been secretly using user DMs to train its AI models. Explore reactions from privacy advocates, tech workers, influencers, politicians, competing platforms, cybersecurity experts, and regular users.",
+    seed: "An anonymous whistleblower leaked a 47-page internal document from Meta revealing that Instagram and WhatsApp messages — including DMs, voice notes, and shared photos — have been used to train Meta's Llama AI models since 2024. The memo, verified by three independent journalists, states: \"User content provides invaluable training signal. Opt-out mechanisms were deliberately made difficult to find.\" Meta's stock dropped 8% in pre-market trading. The FTC announced an immediate investigation. #DeleteMeta and #PrivacyBreach are the top trending hashtags worldwide."
+  },
+  {
+    scenario: "Simulate the heated online discourse after Tesla announces a fully autonomous robotaxi service launching in 3 US cities, with the first reported accident occurring on day one. Explore reactions from Tesla fans, autonomous vehicle skeptics, urban planners, taxi/rideshare drivers, regulators, accident victims' advocates, and tech analysts.",
+    seed: "Tesla launched its Robotaxi service today in Austin, Miami, and Phoenix with a fleet of 5,000 vehicles. Rides cost $0.50/mile — roughly 70% cheaper than Uber. Within 6 hours of launch, a Tesla Robotaxi in Miami ran a red light and collided with a cyclist, who was hospitalized with non-life-threatening injuries. Tesla's VP of Autonomy stated the incident was caused by \"a rare edge case in sensor fusion\" and that the fleet would continue operating. The Miami mayor called for an immediate suspension. Uber and Lyft stocks surged 12%. #RobotaxiFail and #TeslaRobotaxi are trending."
+  },
+  {
+    scenario: "Simulate the global social media reaction after NASA confirms the detection of a repeating, structured radio signal from a star system 42 light-years away that does not match any known natural phenomenon. Explore reactions from scientists, conspiracy theorists, religious leaders, sci-fi fans, world leaders, astronomers, and everyday people processing the implications.",
+    seed: "NASA Administrator Bill Chen held a press conference at 2 PM EST announcing that the James Webb Space Telescope and the SETI Institute have independently confirmed a repeating radio signal from the TRAPPIST-1 system, 42 light-years away. The signal repeats every 73 minutes with a mathematical structure based on prime numbers. \"This does not match any known natural phenomenon,\" said Dr. Sarah Kim, lead researcher. \"We are not claiming extraterrestrial intelligence, but we cannot rule it out.\" The Vatican issued a statement saying faith and science are \"complementary.\" China and the ESA confirmed they are redirecting telescopes to verify. Social media exploded instantly."
+  },
+  {
+    scenario: "Simulate the social media chaos after a massive global outage takes down Google, YouTube, Gmail, and Android services for 48 hours. Explore reactions from businesses that depend on Google, competitors (Microsoft, Apple), remote workers, students, content creators losing ad revenue, and people rediscovering life without Google.",
+    seed: "At 3:17 AM UTC, all Google services went offline simultaneously — Search, YouTube, Gmail, Google Cloud, Google Maps, Android Push Notifications, and the Play Store. Google's status page itself is unreachable. A brief internal message leaked on X reads: \"Critical infrastructure compromise. All hands. Do not discuss externally.\" As of hour 24, no official statement has been made. Microsoft Teams and Outlook saw a 400% traffic spike. Amazon AWS reported record new signups. Schools relying on Google Classroom cancelled classes. YouTubers report losing thousands in daily ad revenue. #GoogleDown has become the most-used hashtag in Twitter history."
+  },
+  {
+    scenario: "Simulate the social media discourse after Apple announces it is acquiring Nintendo for $85 billion, planning to make Nintendo games Apple-exclusive. Explore reactions from gamers, game developers, Nintendo fans, Sony/Microsoft, tech analysts, antitrust advocates, Japanese culture commentators, and Apple enthusiasts.",
+    seed: "Apple CEO Tim Cook and Nintendo President Shuntaro Furukawa held a joint press conference in Kyoto announcing Apple's acquisition of Nintendo for $85 billion — the largest tech acquisition in history. All future Nintendo titles, including Mario, Zelda, and Pokemon, will be exclusive to Apple devices. The Nintendo Switch successor will be cancelled; instead, Apple will release an \"Apple Game\" handheld running iOS. Furukawa stated: \"Nintendo's spirit of play will live on in a new ecosystem.\" Sony's stock rose 15% as investors bet gamers would flee to PlayStation. The gaming community responded with a mix of outrage and disbelief."
+  },
+  {
+    scenario: "Simulate online reactions after a breakthrough study published in Nature demonstrates that a new drug reverses biological aging by 20 years in clinical trials, but it costs $2 million per treatment. Explore reactions from biotech investors, healthcare advocates, ethicists, wealthy tech figures, anti-aging researchers, insurance companies, and regular people debating inequality and access.",
+    seed: "A team at Stanford and Altos Labs published results in Nature showing their drug \"Revitase\" successfully reversed biological age by an average of 20 years in a Phase 2 trial of 200 patients aged 60-80. Telomere length increased, organ function improved, and cognitive performance matched 40-year-olds. However, the treatment requires a personalized cocktail of reprogrammed stem cells costing approximately $2 million. Several billionaires including Jeff Bezos (an Altos Labs investor) reportedly began treatment immediately. The WHO called for \"equitable access discussions.\" Biotech stocks surged across the board. #ImmortalityForSale and #Revitase are trending."
+  },
+  {
+    scenario: "Simulate the social media reaction after the US government announces a universal basic income pilot of $2,000/month for all adults, funded by a new tax on AI company revenues. Explore reactions from AI companies, workers in automated industries, economists, politicians from both parties, small business owners, libertarians, and progressives.",
+    seed: "President Harris announced a landmark executive order establishing the \"American AI Dividend\" — a $2,000/month universal basic income for all US adults, funded by a 15% tax on revenue from companies deriving more than 50% of their income from AI products and services. The program begins in January with a 3-year pilot. OpenAI, Google, and Microsoft would collectively contribute an estimated $180 billion annually. Tech company stocks plunged 9% on average. Labor unions praised the move. Republican leaders called it \"socialism powered by innovation theft.\" #AIDividend and #UBI are the top trending topics."
+  },
+  {
+    scenario: "Simulate the internet discourse after a viral deepfake video of a world leader declaring war turns out to be AI-generated, causing a brief stock market crash before being debunked. Explore reactions from fact-checkers, government officials, AI safety researchers, military analysts, stock traders who lost money, platform trust & safety teams, and citizens questioning what's real.",
+    seed: "At 9:42 AM EST, a hyper-realistic video appearing to show Chinese President Xi Jinping declaring a naval blockade of Taiwan spread across X, Telegram, and TikTok. The S&P 500 plunged 4.2% in 17 minutes. The Pentagon raised alert levels. At 10:15 AM, Chinese state media issued a denial. By 10:30 AM, AI detection tools confirmed the video was generated using an open-source model. Markets partially recovered but ended the day down 1.8%. Total estimated losses: $900 billion in market cap. The video was traced to an anonymous account created 3 hours prior. The incident reignited calls for AI regulation. #DeepfakeWar and #AIThreat dominated the news cycle for days."
+  }
+];
+
+let currentScenarioIndex = 0;
+
+function shuffleScenario() {
+  currentScenarioIndex = (currentScenarioIndex + 1) % EXAMPLE_SCENARIOS.length;
+  const example = EXAMPLE_SCENARIOS[currentScenarioIndex];
+  document.getElementById('launch-scenario').value = example.scenario;
+  document.getElementById('launch-seed').value = example.seed;
+
+  // Animate the dice button
+  const btn = document.querySelector('.dice-btn');
+  btn.classList.add('spin');
+  setTimeout(() => btn.classList.remove('spin'), 300);
+}
+
+// ----------------------------------------------------------------
 // Keyboard shortcuts
 // ----------------------------------------------------------------
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') { closeModal(); closeLaunchModal(); }
   if (e.key === 'p' && !e.target.matches('input,textarea,select')) pauseSim();
   if (e.key === 'r' && !e.target.matches('input,textarea,select')) resumeSim();
+  if (e.key === 'n' && !e.target.matches('input,textarea,select')) openLaunchModal();
 });
 
 // ----------------------------------------------------------------

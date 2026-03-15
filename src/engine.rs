@@ -6,7 +6,7 @@ use rand::Rng;
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::{ActionLogEntry, AgentProfile, AgentState, Tier};
+use crate::agent::{ActionLogEntry, AgentProfile, AgentState, Stance, Tier};
 use crate::config::SimConfig;
 use crate::llm::{self, LlmClient, PostSummary};
 use crate::output::{self, ActionLogger};
@@ -35,6 +35,8 @@ pub struct SimSnapshot {
     pub total_actions: usize,
     pub total_posts: usize,
     pub scenario_prompt: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
 }
 
 pub type SharedState = Arc<RwLock<SimulationState>>;
@@ -48,6 +50,8 @@ pub struct SimulationState {
     pub config: SimConfig,
     pub total_actions: usize,
     pub syntheses: Vec<(u32, String)>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
 }
 
 impl SimulationState {
@@ -60,6 +64,8 @@ impl SimulationState {
             total_actions: self.total_actions,
             total_posts: self.world.posts.len(),
             scenario_prompt: self.config.simulation.scenario_prompt.clone(),
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
         }
     }
 }
@@ -76,7 +82,12 @@ pub enum WsEvent {
     #[serde(rename = "round_start")]
     RoundStart { round: u32, active_agents: usize },
     #[serde(rename = "round_end")]
-    RoundEnd { round: u32, summary: RoundSummary },
+    RoundEnd {
+        round: u32,
+        summary: RoundSummary,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
     #[serde(rename = "god_eye_inject")]
     GodEyeInject { event: InjectedEvent },
     #[serde(rename = "trending_update")]
@@ -85,6 +96,18 @@ pub enum WsEvent {
     Synthesis { round: u32, text: String },
     #[serde(rename = "simulation_end")]
     SimulationEnd { total_rounds: u32, total_actions: usize },
+    #[serde(rename = "status_update")]
+    StatusUpdate {
+        status: String,
+        current_round: u32,
+        total_rounds: u32,
+        total_agents: usize,
+        total_actions: usize,
+        total_posts: usize,
+        scenario_prompt: String,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +169,19 @@ impl SimulationEngine {
         {
             let mut s = self.state.write().await;
             s.status = SimStatus::Running;
+            // Broadcast status update so clients get the new scenario_prompt
+            let snap = s.snapshot();
+            let _ = self.ws_tx.send(WsEvent::StatusUpdate {
+                status: format!("{:?}", snap.status).to_lowercase(),
+                current_round: snap.current_round,
+                total_rounds: snap.total_rounds,
+                total_agents: snap.total_agents,
+                total_actions: snap.total_actions,
+                total_posts: snap.total_posts,
+                scenario_prompt: snap.scenario_prompt,
+                prompt_tokens: snap.prompt_tokens,
+                completion_tokens: snap.completion_tokens,
+            });
         }
 
         for round in 1..=config.simulation.total_rounds {
@@ -180,16 +216,23 @@ impl SimulationEngine {
             // Execute round
             let summary = self.execute_round(round, &config, &mut logger, verbose).await?;
 
+            // Update token counts from LLM client
+            let (pt, ct) = self.llm.token_usage();
+
             // Broadcast round end
             let _ = self.ws_tx.send(WsEvent::RoundEnd {
                 round,
                 summary: summary.clone(),
+                prompt_tokens: pt,
+                completion_tokens: ct,
             });
 
             // Update state
             {
                 let mut s = self.state.write().await;
                 s.world.round_summaries.push(summary);
+                s.prompt_tokens = pt;
+                s.completion_tokens = ct;
             }
 
             // Generate synthesis if needed
@@ -221,6 +264,123 @@ impl SimulationEngine {
         let total_actions = self.state.read().await.total_actions;
         let _ = self.ws_tx.send(WsEvent::SimulationEnd {
             total_rounds: config.simulation.total_rounds,
+            total_actions,
+        });
+
+        Ok(())
+    }
+
+    /// Continue a finished simulation for additional rounds, keeping all existing state.
+    pub async fn run_continuation(&mut self, extra_rounds: u32, verbose: bool) -> anyhow::Result<()> {
+        let config = {
+            let s = self.state.read().await;
+            s.config.clone()
+        };
+
+        let start_round = {
+            let s = self.state.read().await;
+            s.world.current_round + 1
+        };
+        let end_round = start_round + extra_rounds - 1;
+        let new_total = end_round;
+
+        // Update total_rounds in config so the UI shows the right denominator
+        {
+            let mut s = self.state.write().await;
+            s.config.simulation.total_rounds = new_total;
+        }
+
+        let output_dir = &config.output.output_dir;
+        let mut logger = ActionLogger::new(output_dir, &config.output.action_log)?;
+        let pb = output::create_progress_bar(extra_rounds);
+
+        {
+            let mut s = self.state.write().await;
+            s.status = SimStatus::Running;
+            let snap = s.snapshot();
+            let _ = self.ws_tx.send(WsEvent::StatusUpdate {
+                status: format!("{:?}", snap.status).to_lowercase(),
+                current_round: snap.current_round,
+                total_rounds: snap.total_rounds,
+                total_agents: snap.total_agents,
+                total_actions: snap.total_actions,
+                total_posts: snap.total_posts,
+                scenario_prompt: snap.scenario_prompt,
+                prompt_tokens: snap.prompt_tokens,
+                completion_tokens: snap.completion_tokens,
+            });
+        }
+
+        for round in start_round..=end_round {
+            if self.stop_rx.try_recv().is_ok() {
+                tracing::info!("Stop signal received at round {round}");
+                break;
+            }
+
+            if self.pause_rx.try_recv().is_ok() {
+                self.paused = true;
+                let mut s = self.state.write().await;
+                s.status = SimStatus::Paused;
+            }
+            while self.paused {
+                if self.resume_rx.try_recv().is_ok() {
+                    self.paused = false;
+                    let mut s = self.state.write().await;
+                    s.status = SimStatus::Running;
+                }
+                if self.stop_rx.try_recv().is_ok() {
+                    let mut s = self.state.write().await;
+                    s.status = SimStatus::Finished;
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+
+            let summary = self.execute_round(round, &config, &mut logger, verbose).await?;
+
+            let (pt, ct) = self.llm.token_usage();
+            let _ = self.ws_tx.send(WsEvent::RoundEnd {
+                round,
+                summary: summary.clone(),
+                prompt_tokens: pt,
+                completion_tokens: ct,
+            });
+
+            {
+                let mut s = self.state.write().await;
+                s.world.round_summaries.push(summary);
+                s.prompt_tokens = pt;
+                s.completion_tokens = ct;
+            }
+
+            if config.synthesis.enabled
+                && round > 0
+                && round % config.synthesis.every_n_rounds == 0
+            {
+                if let Some(text) = self.generate_synthesis(round, &config).await {
+                    let _ = self.ws_tx.send(WsEvent::Synthesis {
+                        round,
+                        text: text.clone(),
+                    });
+                    let mut s = self.state.write().await;
+                    s.syntheses.push((round, text));
+                }
+            }
+
+            logger.flush()?;
+            pb.set_position((round - start_round + 1) as u64);
+        }
+
+        pb.finish_with_message("Continuation complete");
+
+        {
+            let mut s = self.state.write().await;
+            s.status = SimStatus::Finished;
+        }
+
+        let total_actions = self.state.read().await.total_actions;
+        let _ = self.ws_tx.send(WsEvent::SimulationEnd {
+            total_rounds: end_round,
             total_actions,
         });
 
@@ -420,7 +580,10 @@ impl SimulationEngine {
             all_actions.extend(actions);
         }
 
-        // 5. Build round summary
+        // 5. Update sentiment drift
+        update_sentiments(&self.state, round).await;
+
+        // 6. Build round summary
         let mut new_posts = 0;
         let mut new_replies = 0;
         let mut new_likes = 0;
@@ -683,11 +846,13 @@ async fn execute_batch(
         let Some(profile) = s.agents.get(&agent_id).cloned() else {
             return Vec::new();
         };
-        let memory_text = s
-            .agent_states
-            .get(&agent_id)
+        let agent_state = s.agent_states.get(&agent_id);
+        let memory_text = agent_state
             .map(|st| st.memory.render(round))
             .unwrap_or_default();
+        let current_sentiment = agent_state
+            .map(|st| st.current_sentiment)
+            .unwrap_or(profile.sentiment_bias);
 
         let feed = s.world.build_feed(
             &agent_id,
@@ -707,7 +872,11 @@ async fn execute_batch(
             .map(|p| PostSummary::from_post(p, round, 80))
             .collect();
 
-        let system = llm::build_single_system_prompt(&profile);
+        // Build reply candidates
+        let runtime_stance = Stance::from_sentiment(current_sentiment);
+        let reply_candidates = s.world.build_reply_candidates(&agent_id, &runtime_stance, 4);
+
+        let system = llm::build_single_system_prompt(&profile, current_sentiment);
         let user = llm::build_single_user_prompt(
             round,
             total_rounds,
@@ -715,6 +884,7 @@ async fn execute_batch(
             &memory_text,
             &feed_summaries,
             &trending_summaries,
+            &reply_candidates,
             events,
         );
 
@@ -747,16 +917,18 @@ async fn execute_batch(
             _ => 10,
         };
 
-        let agents_with_memory: Vec<(AgentProfile, String)> = agent_ids
+        let agents_with_memory: Vec<(AgentProfile, String, f32)> = agent_ids
             .iter()
             .filter_map(|id| {
                 let profile = s.agents.get(id)?.clone();
-                let memory = s
-                    .agent_states
-                    .get(id)
+                let agent_state = s.agent_states.get(id);
+                let memory = agent_state
                     .map(|st| st.memory.render_short(round, memory_recent_count))
                     .unwrap_or_default();
-                Some((profile, memory))
+                let sentiment = agent_state
+                    .map(|st| st.current_sentiment)
+                    .unwrap_or(profile.sentiment_bias);
+                Some((profile, memory, sentiment))
             })
             .collect();
 
@@ -795,7 +967,7 @@ async fn execute_batch(
         // Clone profiles for post-parse use
         let profiles: HashMap<String, (Uuid, AgentProfile)> = agents_with_memory
             .iter()
-            .map(|(p, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
+            .map(|(p, _, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
             .collect();
 
         drop(s);
@@ -1065,12 +1237,11 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
         ActionType::DoNothing => {}
     }
 
-    // Update agent memory with observation
+    // Update agent memory with rich observation (includes context)
     if !matches!(action.action_type, ActionType::DoNothing | ActionType::PinMemory) {
+        let rich_desc = describe_action_rich(action, state);
         if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
-            agent_state
-                .memory
-                .observe(action.round, describe_action(action));
+            agent_state.memory.observe(action.round, rich_desc);
         }
     }
 
@@ -1112,6 +1283,164 @@ fn describe_action(action: &Action) -> String {
         ActionType::DoNothing => format!("idle"),
         ActionType::PinMemory => format!("pinned a memory"),
     }
+}
+
+/// Rich action description with context for agent memory.
+fn describe_action_rich(action: &Action, state: &SimulationState) -> String {
+    match &action.action_type {
+        ActionType::CreatePost => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            format!("I posted: \"{preview}\"")
+        }
+        ActionType::Reply => {
+            let my_reply = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            if let Some(target_id) = action.target_post_id {
+                if let Some(target_post) = state.world.posts.get(&target_id) {
+                    let target_preview: String = target_post.content.chars().take(60).collect();
+                    format!(
+                        "I replied to @{} who said \"{}...\" with \"{}\"",
+                        target_post.author_name, target_preview, my_reply
+                    )
+                } else {
+                    format!("I replied: \"{my_reply}\"")
+                }
+            } else {
+                format!("I replied: \"{my_reply}\"")
+            }
+        }
+        ActionType::Like => {
+            if let Some(target_id) = action.target_post_id {
+                if let Some(target_post) = state.world.posts.get(&target_id) {
+                    let preview: String = target_post.content.chars().take(50).collect();
+                    format!("I liked @{}'s post: \"{}...\"", target_post.author_name, preview)
+                } else {
+                    "I liked a post".into()
+                }
+            } else {
+                "I liked a post".into()
+            }
+        }
+        ActionType::Repost => {
+            if let Some(target_id) = action.target_post_id {
+                if let Some(target_post) = state.world.posts.get(&target_id) {
+                    let preview: String = target_post.content.chars().take(50).collect();
+                    format!("I reposted @{}: \"{}...\"", target_post.author_name, preview)
+                } else {
+                    "I reposted".into()
+                }
+            } else {
+                "I reposted".into()
+            }
+        }
+        ActionType::Follow => {
+            if let Some(target_id) = action.target_agent_id {
+                if let Some(target_profile) = state.agents.get(&target_id) {
+                    format!("I followed @{} ({})", target_profile.username, Stance::from_sentiment(
+                        state.agent_states.get(&target_id).map(|s| s.current_sentiment).unwrap_or(0.0)
+                    ))
+                } else {
+                    "I followed someone".into()
+                }
+            } else {
+                "I followed someone".into()
+            }
+        }
+        ActionType::Unfollow => "I unfollowed someone".into(),
+        ActionType::DoNothing => "idle".into(),
+        ActionType::PinMemory => "pinned a memory".into(),
+    }
+}
+
+/// Update agent sentiments based on interactions this round.
+async fn update_sentiments(state: &SharedState, round: u32) {
+    let mut s = state.write().await;
+
+    // Collect interaction data for each agent this round
+    let agent_ids: Vec<Uuid> = s.agent_states.keys().cloned().collect();
+
+    for agent_id in &agent_ids {
+        // Find posts this agent interacted with this round (liked or replied to)
+        let interactions: Vec<f32> = {
+            let agent_state = match s.agent_states.get(agent_id) {
+                Some(st) => st,
+                None => continue,
+            };
+
+            // Look at recent action log entries from this round
+            agent_state.action_log.iter()
+                .filter(|entry| entry.round == round)
+                .filter_map(|entry| {
+                    // Get the sentiment of the content the agent interacted with
+                    match entry.action_type.as_str() {
+                        "like" | "reply" | "repost" => {
+                            // Simple sentiment heuristic from content
+                            if let Some(content) = &entry.content {
+                                Some(estimate_content_sentiment(content))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+
+        if interactions.is_empty() {
+            continue;
+        }
+
+        let exposure_avg = interactions.iter().sum::<f32>() / interactions.len() as f32;
+
+        let profile = match s.agents.get(agent_id) {
+            Some(p) => p,
+            None => continue,
+        };
+        let conviction = profile.sentiment_bias.abs();
+        let drift_rate = 0.05 * (1.0 - conviction * 0.5);
+
+        let agent_state = match s.agent_states.get_mut(agent_id) {
+            Some(st) => st,
+            None => continue,
+        };
+
+        let pull = exposure_avg - agent_state.current_sentiment;
+        agent_state.current_sentiment =
+            (agent_state.current_sentiment + pull * drift_rate).clamp(-1.0, 1.0);
+        agent_state.sentiment_history.push((round, agent_state.current_sentiment));
+    }
+}
+
+/// Simple heuristic to estimate sentiment of content (-1.0 to 1.0).
+fn estimate_content_sentiment(content: &str) -> f32 {
+    let lower = content.to_lowercase();
+    let positive_words = ["great", "good", "amazing", "love", "excellent", "innovative",
+        "progress", "exciting", "brilliant", "impressive", "opportunity", "support",
+        "fantastic", "wonderful", "helpful"];
+    let negative_words = ["terrible", "awful", "hate", "worst", "greed", "scam",
+        "disaster", "outrage", "betrayal", "unacceptable", "horrible", "disgusting",
+        "shame", "pathetic", "ridiculous"];
+
+    let pos_count = positive_words.iter().filter(|w| lower.contains(*w)).count() as f32;
+    let neg_count = negative_words.iter().filter(|w| lower.contains(*w)).count() as f32;
+
+    if pos_count + neg_count == 0.0 {
+        return 0.0;
+    }
+
+    ((pos_count - neg_count) / (pos_count + neg_count)).clamp(-1.0, 1.0)
 }
 
 fn extract_hashtags(content: &str) -> Vec<String> {

@@ -211,6 +211,8 @@ async fn cmd_report(
         config: config.clone(),
         total_actions: 0,
         syntheses: Vec::new(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
     };
 
     let report_text = report::generate_report(&llm, &state).await?;
@@ -241,6 +243,8 @@ async fn cmd_server(config_path: &std::path::Path) -> anyhow::Result<()> {
         config: config.clone(),
         total_actions: 0,
         syntheses: Vec::new(),
+        prompt_tokens: 0,
+        completion_tokens: 0,
     }));
 
     let (ws_tx, _) = broadcast::channel::<engine::WsEvent>(1024);
@@ -344,11 +348,11 @@ async fn cmd_run(
     let mut agent_states_map = HashMap::new();
     for a in agents {
         let id = a.id;
-        agent_states_map.insert(id, AgentState::new(id));
+        agent_states_map.insert(id, AgentState::new_with_sentiment(id, a.sentiment_bias));
         agents_map.insert(id, a);
     }
 
-    let state = Arc::new(RwLock::new(SimulationState {
+    let mut sim_state = SimulationState {
         status: SimStatus::Preparing,
         agents: agents_map,
         agent_states: agent_states_map,
@@ -356,7 +360,14 @@ async fn cmd_run(
         config: config.clone(),
         total_actions: 0,
         syntheses: Vec::new(),
-    }));
+        prompt_tokens: 0,
+        completion_tokens: 0,
+    };
+
+    // Seed social graph before simulation starts
+    launcher::seed_social_graph(&mut sim_state);
+
+    let state = Arc::new(RwLock::new(sim_state));
 
     // --- Phase 3: Setup channels ---
     let (ws_tx, _) = broadcast::channel::<engine::WsEvent>(1024);

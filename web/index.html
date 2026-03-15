@@ -17,8 +17,10 @@
       <span id="status-badge" class="badge">IDLE</span>
       <span id="round-info">Round 0/0</span>
       <span id="agent-count">0 agents</span>
+      <span id="token-count" class="token-counter">0 tokens</span>
     </div>
     <div class="header-right">
+      <button id="btn-new-sim" class="primary" onclick="openLaunchModal()">New Simulation</button>
       <button id="btn-pause" onclick="pauseSim()" disabled>Pause</button>
       <button id="btn-resume" onclick="resumeSim()" disabled>Resume</button>
       <button id="btn-stop" onclick="stopSim()" disabled>Stop</button>
@@ -41,26 +43,34 @@
     <div class="synthesis-body" id="synthesis-body"></div>
   </div>
 
-  <!-- Launch panel (shown when idle/finished) -->
-  <div id="launch-panel" class="launch-panel">
-    <div class="launch-inner">
-      <h2>Launch New Simulation</h2>
-      <div class="launch-field">
-        <label for="launch-scenario">Scenario Prompt</label>
-        <textarea id="launch-scenario" rows="4" placeholder="Describe the scenario to simulate... e.g. 'Simulate public reaction on social media to a major tech company announcing mass layoffs due to AI automation.'"></textarea>
+  <!-- Launch modal -->
+  <div id="launch-modal" class="modal" onclick="if(event.target===this)closeLaunchModal()">
+    <div class="modal-content launch-modal-content">
+      <button class="modal-close" onclick="closeLaunchModal()">&times;</button>
+      <div class="launch-modal-header">
+        <h2>New Simulation</h2>
+        <button class="dice-btn" onclick="shuffleScenario()" title="Random example scenario">&#127922;</button>
       </div>
-      <div class="launch-row">
+      <div class="launch-modal-body">
         <div class="launch-field">
-          <label for="launch-rounds">Rounds</label>
-          <input type="number" id="launch-rounds" value="5" min="1" max="100">
+          <label for="launch-scenario">Scenario Prompt</label>
+          <textarea id="launch-scenario" rows="5" placeholder="Describe the scenario to simulate...">Simulate the public reaction on social media after OpenAI announces that GPT-5 will cost $200/month for the Pro tier, while making the free tier significantly more limited. Explore reactions from AI developers, startup founders, students, competitors (Google, Anthropic, Meta), tech journalists, and everyday users debating accessibility, pricing, and the future of AI democratization.</textarea>
         </div>
-        <div class="launch-field" style="flex:1">
-          <label for="launch-seed">Seed Document (optional)</label>
-          <textarea id="launch-seed" rows="3" placeholder="Paste background info, news article, or context text..."></textarea>
+        <div class="launch-field">
+          <label for="launch-seed">Seed Document <span class="optional-tag">optional</span></label>
+          <textarea id="launch-seed" rows="5" placeholder="Paste a news article, background context, or reference text to ground the simulation...">OpenAI CEO Sam Altman announced today that GPT-5, codenamed "Orion," will launch next month with a new pricing structure. The Pro tier jumps from $20/month to $200/month, offering unlimited GPT-5 access, advanced reasoning, and a 1M token context window. The free tier will be restricted to GPT-4o-mini with 10 messages per day. Altman stated: "Building frontier AI is extraordinarily expensive. We need sustainable pricing to continue pushing the boundaries." The announcement comes as Google DeepMind releases Gemini 3 Ultra for free, and Anthropic offers Claude 4 at $30/month. Tech Twitter erupted immediately, with #OpenAIGreed and #GPT5Pricing trending within hours. YC-backed startups report scrambling to evaluate alternatives, while enterprise customers express concerns about vendor lock-in.</textarea>
+        </div>
+        <div class="launch-bottom-row">
+          <div class="launch-field launch-rounds-field">
+            <label for="launch-rounds">Rounds</label>
+            <input type="number" id="launch-rounds" value="10" min="1" max="100">
+          </div>
+          <div class="launch-actions">
+            <div id="launch-status" class="launch-status"></div>
+            <button class="primary launch-btn" id="btn-launch" onclick="launchSim()">Launch Simulation</button>
+          </div>
         </div>
       </div>
-      <button class="primary launch-btn" id="btn-launch" onclick="launchSim()">Launch Simulation</button>
-      <div id="launch-status" class="launch-status"></div>
     </div>
   </div>
 
@@ -116,6 +126,15 @@
       <div class="god-eye-section">
         <h3>Event Log</h3>
         <div id="event-log"></div>
+      </div>
+
+      <div class="god-eye-section" id="continue-section" style="display:none;">
+        <h3>Continue Simulation</h3>
+        <div class="inject-row">
+          <input type="number" id="continue-rounds" value="5" min="1" max="100" placeholder="Rounds">
+          <button class="primary" onclick="continueSim()">Continue</button>
+        </div>
+        <div id="continue-status" class="launch-status"></div>
       </div>
 
       <div class="god-eye-section">

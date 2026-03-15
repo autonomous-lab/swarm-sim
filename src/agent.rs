@@ -43,6 +43,111 @@ impl std::fmt::Display for Stance {
     }
 }
 
+impl Stance {
+    /// Derive stance from a sentiment float (-1.0 to 1.0).
+    pub fn from_sentiment(s: f32) -> Self {
+        if s > 0.3 {
+            Stance::Supportive
+        } else if s < -0.3 {
+            Stance::Opposing
+        } else if s.abs() < 0.1 {
+            Stance::Observer
+        } else {
+            Stance::Neutral
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorArchetype {
+    Analyst,
+    Provocateur,
+    Lurker,
+    Cheerleader,
+    Shitposter,
+    Journalist,
+    Normie,
+    Activist,
+}
+
+impl std::fmt::Display for BehaviorArchetype {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BehaviorArchetype::Analyst => write!(f, "analyst"),
+            BehaviorArchetype::Provocateur => write!(f, "provocateur"),
+            BehaviorArchetype::Lurker => write!(f, "lurker"),
+            BehaviorArchetype::Cheerleader => write!(f, "cheerleader"),
+            BehaviorArchetype::Shitposter => write!(f, "shitposter"),
+            BehaviorArchetype::Journalist => write!(f, "journalist"),
+            BehaviorArchetype::Normie => write!(f, "normie"),
+            BehaviorArchetype::Activist => write!(f, "activist"),
+        }
+    }
+}
+
+impl BehaviorArchetype {
+    /// Max post length in characters for this archetype.
+    pub fn max_post_length(&self) -> u16 {
+        match self {
+            BehaviorArchetype::Analyst => 500,
+            BehaviorArchetype::Journalist => 400,
+            BehaviorArchetype::Activist => 300,
+            BehaviorArchetype::Provocateur => 200,
+            BehaviorArchetype::Cheerleader => 150,
+            BehaviorArchetype::Normie => 100,
+            BehaviorArchetype::Shitposter => 80,
+            BehaviorArchetype::Lurker => 50,
+        }
+    }
+
+    /// Returns (behavior_description, action_preferences, style_rules)
+    pub fn prompt_instructions(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            BehaviorArchetype::Analyst => (
+                "Thoughtful analyst. Data-driven, measured, cites specifics.",
+                "40% create_post, 30% reply, 20% like, 10% follow",
+                "2-4 sentences. Reference numbers, comparisons, trends. Measured tone. NO hashtags. Write like a financial analyst quoting.",
+            ),
+            BehaviorArchetype::Provocateur => (
+                "Confrontational contrarian. Pokes holes, rhetorical questions. NEVER agrees politely.",
+                "50% reply (DISAGREE), 30% create_post (hot take), 20% like",
+                "1-2 sentences MAX. Aggressive, direct, rhetorical questions. Pick fights. Be blunt and dismissive. NO hashtags.",
+            ),
+            BehaviorArchetype::Lurker => (
+                "SILENT OBSERVER. Almost NEVER posts. 1-5 words MAX. Mostly likes and reposts.",
+                "60% like, 20% repost, 10% do_nothing, 10% reply (1-5 WORDS ONLY)",
+                "STRICT: 1-5 words MAXIMUM. One reaction word or emoji-like expression. NEVER write a full sentence. NO hashtags.",
+            ),
+            BehaviorArchetype::Cheerleader => (
+                "Enthusiastic supporter. Amplifies, cheers, exclamation marks. Short and energetic.",
+                "40% like, 25% repost, 20% reply (supportive), 15% follow",
+                "1-2 sentences MAX. Exclamation marks, positive energy. NO hashtags. Just raw enthusiasm.",
+            ),
+            BehaviorArchetype::Shitposter => (
+                "Chaotic shitposter. Sarcasm, absurdist humor, irony. Mocks everything including serious takes.",
+                "40% create_post (sarcastic), 30% reply (mocking), 20% like, 10% repost",
+                "1 sentence MAX. Pure sarcasm, irony, absurd comparisons. Mock serious people. NO hashtags. Think deadpan Twitter humor.",
+            ),
+            BehaviorArchetype::Journalist => (
+                "Reporter/journalist. Probing questions, news framing, seeks angles. Neutral but sharp.",
+                "40% create_post (news), 30% reply (questions), 20% like, 10% follow",
+                "2-3 sentences. Frame as breaking news. Ask probing questions. Professional tone. NO hashtags (journalists don't use them in posts).",
+            ),
+            BehaviorArchetype::Normie => (
+                "Average person. Simple genuine reactions. NOT analytical. Short casual language.",
+                "35% like, 25% reply (short casual), 20% do_nothing, 15% repost, 5% create_post",
+                "1-2 sentences MAX. Casual language, contractions, abbreviations (lol, tbh, ngl, idk, bruh, omg, lowkey). React emotionally, not intellectually. NO hashtags. NO analysis.",
+            ),
+            BehaviorArchetype::Activist => (
+                "Passionate activist. Justice lens, systemic framing, calls to action. Urgent and moral.",
+                "40% create_post (calls to action), 30% reply (reframe), 20% repost, 10% like",
+                "2-3 sentences. Urgent tone. MAX 1 hashtag per post (organic, not generic). Frame as systemic issue. Each post must make a UNIQUE point — never repeat another user's argument.",
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent Profile (immutable during simulation)
 // ---------------------------------------------------------------------------
@@ -60,6 +165,7 @@ pub struct AgentProfile {
     pub stance: Stance,
     pub sentiment_bias: f32,
     pub influence_weight: f32,
+    pub archetype: BehaviorArchetype,
 
     // Activity
     pub activity_level: f32,
@@ -122,6 +228,8 @@ pub struct AgentState {
     pub liked_post_ids: Vec<Uuid>,
     pub memory: AgentMemory,
     pub action_log: Vec<ActionLogEntry>,
+    pub current_sentiment: f32,
+    pub sentiment_history: Vec<(u32, f32)>,
 }
 
 impl AgentState {
@@ -132,8 +240,24 @@ impl AgentState {
             following: Vec::new(),
             post_ids: Vec::new(),
             liked_post_ids: Vec::new(),
-            memory: AgentMemory::new(20, 5),
+            memory: AgentMemory::new(30, 8),
             action_log: Vec::new(),
+            current_sentiment: 0.0,
+            sentiment_history: Vec::new(),
+        }
+    }
+
+    pub fn new_with_sentiment(agent_id: Uuid, initial_sentiment: f32) -> Self {
+        Self {
+            agent_id,
+            followers: Vec::new(),
+            following: Vec::new(),
+            post_ids: Vec::new(),
+            liked_post_ids: Vec::new(),
+            memory: AgentMemory::new(30, 8),
+            action_log: Vec::new(),
+            current_sentiment: initial_sentiment,
+            sentiment_history: vec![(0, initial_sentiment)],
         }
     }
 
