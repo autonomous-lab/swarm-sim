@@ -1,8 +1,14 @@
+<p align="center">
+  <img src="assets/banner.png" alt="swarm-sim — tiered agent network" width="100%">
+</p>
+
 # Swarm-Sim
 
 **Multi-agent social simulation engine with tiered LLM batching.**
 
 Built in Rust. Async. Fast. Configurable. With a real-time web UI.
+
+> **Why this exists:** Read the [full story](story.md) — how I reverse-engineered a $4M AI project, found it was making 7,200 API calls where 864 would do, and rebuilt it from scratch in Rust.
 
 ---
 
