@@ -355,16 +355,78 @@ After the simulation, a report is generated at `output/report.md` with:
 
 ---
 
+## How Many Rounds?
+
+Not every simulation needs 72 rounds. The right number depends on what you're looking for:
+
+| Rounds | Simulated Time | What You See | Best For |
+|--------|---------------|--------------|----------|
+| **5** | 5 hours | Immediate reactions, first takes | Quick scenario testing, "what's the initial vibe?" |
+| **15-20** | ~1 day | Camps form, counter-narratives emerge, echo chambers start | **Sweet spot for most use cases** |
+| **30** | 30 hours | Polarization, opinion shifts, social graph evolution | Studying narrative dynamics |
+| **72** | 3 days | Full news cycle: shock → debate → polarization → new equilibrium | God's Eye experiments, deep scenario exploration |
+
+**Our recommendation: start with 15 rounds.** That's enough to see second-order effects (reactions to reactions, alliances forming, sentiment shifts) without LLM agents starting to loop on repetitive patterns. Increase to 30-72 if you're using God's Eye to inject mid-simulation events — that's where high round counts shine.
+
+---
+
 ## Cost Estimation
 
-Approximate costs for a simulation with 100 agents, 72 rounds:
+Swarm-Sim uses tiered batching, so costs depend on which models you assign to each tier. Here's a breakdown for **100 agents** with activity-adjusted call counts:
 
-| Approach | Calls | Estimated Cost (GPT-4o-mini) |
-|----------|-------|------------------------------|
-| Traditional (1 call/agent/round) | 7,200 | ~$15-30 |
-| **Swarm-Sim tiered batching** | 864 | ~$2-5 |
+### Recommended: Gemini 3 Flash ($0.50/1M in, $3.00/1M out)
 
-Using cheap models (Qwen, DeepSeek) for Tier 3 further reduces costs. A typical simulation costs **$1-3**.
+The best price/performance ratio. Use it for all three tiers:
+
+| Rounds | T1 Calls | T2 Calls | T3 Calls | Total Calls | **Estimated Cost** |
+|--------|----------|----------|----------|-------------|-------------------|
+| 5 | 25 | 10 | 5 | ~45 | **~$0.06** |
+| 15 | 75 | 30 | 15 | ~125 | **~$0.16** |
+| 30 | 150 | 60 | 30 | ~245 | **~$0.31** |
+| 72 | 360 | 144 | 72 | ~580 | **~$0.73** |
+
+A full 72-round simulation with 100 agents for **under $1**. That's the power of tiered batching + cheap models.
+
+### Mixed setup (GPT-4o for VIPs, GPT-4o-mini for Standard, Gemini Flash for Figurants)
+
+| Rounds | T1 Cost | T2 Cost | T3 Cost | **Total** |
+|--------|---------|---------|---------|-----------|
+| 5 | $0.12 | $0.003 | $0.006 | **~$0.15** |
+| 15 | $0.37 | $0.009 | $0.019 | **~$0.45** |
+| 72 | $1.80 | $0.043 | $0.090 | **~$2.00** |
+
+### vs Traditional (1 call/agent/round)
+
+| Approach | Calls (100 agents, 15 rounds) | Cost (GPT-4o) | Cost (Gemini Flash) |
+|----------|-------------------------------|---------------|---------------------|
+| Traditional | ~900 | ~$4.50 | ~$1.13 |
+| **Swarm-Sim** | ~125 | ~$0.45 | ~$0.16 |
+| **Savings** | **86% fewer calls** | **90% cheaper** | **86% cheaper** |
+
+### Config example with Gemini 3 Flash
+
+```toml
+# All tiers on Gemini 3 Flash — cheapest setup
+[tiers.tier1]
+batch_size = 1
+model = "gemini-3-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
+
+[tiers.tier2]
+batch_size = 8
+model = "gemini-3-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
+
+[tiers.tier3]
+batch_size = 25
+model = "gemini-3-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
+```
+
+Any OpenAI-compatible API works: OpenAI, Google Gemini, Anthropic (via proxy), DashScope (Qwen), DeepSeek, Ollama (local), etc.
 
 ---
 
