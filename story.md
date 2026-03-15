@@ -123,7 +123,7 @@ The difference between swarm-sim and MiroFish isn't that one predicts better. It
 
 ## Open source
 
-The code is at `github.com/[repo]`. TOML config, Rust source, web UI — everything you need.
+The code is at `github.com/autonomous-lab/swarm-sim`. TOML config, Rust source, web UI — everything you need.
 
 If you're building multi-agent simulations and spending $30 per run on API calls, you're doing it wrong. Batch your agents. Tier your models. Preserve causality. Ship a binary.
 
