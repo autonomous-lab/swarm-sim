@@ -146,6 +146,14 @@ The web interface runs at `http://localhost:3000` (configurable) and provides a 
 
 Three-panel layout: agents list (left), live feed with posts/replies/likes (center), and God's Eye event injection + stats (right). Posts are color-coded by tier and action type.
 
+### Launcher
+
+<p align="center">
+  <img src="screenshots/launcher-view.png" alt="swarm-sim launcher" width="100%">
+</p>
+
+Launch simulations from the browser — set your scenario prompt, paste a seed document, choose rounds and agent count. The cost estimator shows real-time API call, token, and cost projections before you hit launch.
+
 ### Keyboard Shortcuts
 
 | Key | Action |
