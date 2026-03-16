@@ -442,7 +442,7 @@ fn fix_truncated_json(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build the system prompt for a single (Tier 1) agent.
-pub fn build_single_system_prompt(agent: &AgentProfile, current_sentiment: f32) -> String {
+pub fn build_single_system_prompt(agent: &AgentProfile, current_sentiment: f32, challenge_question: Option<&str>) -> String {
     let (behavior, _action_mix, style) = agent.archetype.prompt_instructions();
     let runtime_stance = Stance::from_sentiment(current_sentiment);
     let max_len = agent.archetype.max_post_length();
@@ -475,7 +475,7 @@ ACTIONS:
 - like: "target_post_id"
 - repost: "target_post_id"
 - follow: "target_agent_id"
-- do_nothing: skip
+- do_nothing: skip{propose_solution_action}
 
 JSON ONLY (pin_memory is optional — only include if you want to remember something specific):
 {{
@@ -487,6 +487,11 @@ JSON ONLY (pin_memory is optional — only include if you want to remember somet
         bio = agent.bio,
         stance = runtime_stance,
         sentiment = current_sentiment,
+        propose_solution_action = if challenge_question.is_some() {
+            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)"
+        } else {
+            ""
+        },
     )
 }
 
@@ -500,6 +505,7 @@ pub fn build_single_user_prompt(
     trending_posts: &[PostSummary],
     reply_candidates: &[ReplyCandidate],
     events: &[String],
+    challenge_question: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -562,6 +568,10 @@ pub fn build_single_user_prompt(
         }
     }
 
+    if let Some(q) = challenge_question {
+        parts.push(format!("\nCHALLENGE QUESTION (you may use propose_solution if you have a concrete idea):\n{q}"));
+    }
+
     parts.join("\n")
 }
 
@@ -569,6 +579,7 @@ pub fn build_single_user_prompt(
 pub fn build_batch_system_prompt(
     agents: &[(AgentProfile, String, f32)],
     persona_max_chars: usize,
+    challenge_question: Option<&str>,
 ) -> String {
     let mut agent_descs = String::new();
     for (agent, memory_short, sentiment) in agents {
@@ -615,7 +626,7 @@ ACTIONS (0-2 per user):
 - like: "target_post_id"
 - repost: "target_post_id"
 - follow: "target_agent_id"
-- do_nothing: skip
+- do_nothing: skip{propose_solution_action}
 
 CRITICAL — UNIQUENESS RULES (violations will be rejected):
 1. Each user MUST express a COMPLETELY DIFFERENT thought. NO two users can share the same point, angle, or conclusion.
@@ -633,6 +644,11 @@ JSON ONLY (pin_memory field is optional — omit it or set to null if nothing to
   ]
 }}"#,
         n = agents.len(),
+        propose_solution_action = if challenge_question.is_some() {
+            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)"
+        } else {
+            ""
+        },
     )
 }
 
@@ -645,6 +661,7 @@ pub fn build_batch_user_prompt(
     trending_posts: &[PostSummary],
     prior_tier_actions: &[String],
     events: &[String],
+    challenge_question: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
 
@@ -691,6 +708,10 @@ pub fn build_batch_user_prompt(
         for e in events {
             parts.push(format!("  {e}"));
         }
+    }
+
+    if let Some(q) = challenge_question {
+        parts.push(format!("\nCHALLENGE QUESTION (agents may use propose_solution if they have a concrete idea):\n{q}"));
     }
 
     parts.join("\n")

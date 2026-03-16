@@ -494,6 +494,7 @@ impl SimulationEngine {
                 new_reposts: 0,
                 new_follows: 0,
                 events_injected: injected_count,
+                new_solutions: 0,
             });
         }
 
@@ -589,6 +590,7 @@ impl SimulationEngine {
         let mut new_likes = 0;
         let mut new_reposts = 0;
         let mut new_follows = 0;
+        let mut new_solutions = 0;
 
         for action in &all_actions {
             match action.action_type {
@@ -597,6 +599,7 @@ impl SimulationEngine {
                 ActionType::Like => new_likes += 1,
                 ActionType::Repost => new_reposts += 1,
                 ActionType::Follow => new_follows += 1,
+                ActionType::ProposeSolution => new_solutions += 1,
                 _ => {}
             }
         }
@@ -618,6 +621,7 @@ impl SimulationEngine {
             new_reposts,
             new_follows,
             events_injected: injected_count,
+            new_solutions,
         })
     }
 
@@ -649,10 +653,11 @@ impl SimulationEngine {
             let evts = events.to_vec();
             let total_rounds = config.simulation.total_rounds;
             let world_config = config.world.clone();
+            let challenge_q = config.simulation.challenge_question.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                execute_batch(llm, state, tier, &batch, &prior, &evts, round, total_rounds, &world_config).await
+                execute_batch(llm, state, tier, &batch, &prior, &evts, round, total_rounds, &world_config, challenge_q).await
             }));
         }
 
@@ -839,6 +844,7 @@ async fn execute_batch(
     round: u32,
     total_rounds: u32,
     world_config: &crate::config::WorldConfig,
+    challenge_question: Option<String>,
 ) -> Vec<Action> {
     let s = state.read().await;
     let simulated_time = s.world.simulated_time.format("%Y-%m-%d %H:%M").to_string();
@@ -879,7 +885,7 @@ async fn execute_batch(
         let runtime_stance = Stance::from_sentiment(current_sentiment);
         let reply_candidates = s.world.build_reply_candidates(&agent_id, &runtime_stance, 4);
 
-        let system = llm::build_single_system_prompt(&profile, current_sentiment);
+        let system = llm::build_single_system_prompt(&profile, current_sentiment, challenge_question.as_deref());
         let user = llm::build_single_user_prompt(
             round,
             total_rounds,
@@ -889,6 +895,7 @@ async fn execute_batch(
             &trending_summaries,
             &reply_candidates,
             events,
+            challenge_question.as_deref(),
         );
 
         drop(s); // Release read lock before LLM call
@@ -956,7 +963,7 @@ async fn execute_batch(
             .map(|p| PostSummary::from_post(p, round, 60))
             .collect();
 
-        let system = llm::build_batch_system_prompt(&agents_with_memory, persona_max);
+        let system = llm::build_batch_system_prompt(&agents_with_memory, persona_max, challenge_question.as_deref());
         let user = llm::build_batch_user_prompt(
             round,
             total_rounds,
@@ -965,6 +972,7 @@ async fn execute_batch(
             &trending_summaries,
             prior_actions,
             events,
+            challenge_question.as_deref(),
         );
 
         // Clone profiles for post-parse use
@@ -1015,6 +1023,7 @@ fn convert_single_actions(
             "unfollow" => ActionType::Unfollow,
             "do_nothing" => ActionType::DoNothing,
             "pin_memory" => ActionType::PinMemory,
+            "propose_solution" => ActionType::ProposeSolution,
             _ => continue,
         };
 
@@ -1085,6 +1094,7 @@ fn convert_batch_actions(
                 "unfollow" => ActionType::Unfollow,
                 "do_nothing" => ActionType::DoNothing,
                 "pin_memory" => ActionType::PinMemory,
+                "propose_solution" => ActionType::ProposeSolution,
                 _ => continue,
             };
 
@@ -1165,7 +1175,7 @@ fn dedup_actions(actions: &mut Vec<Action>) {
     let post_indices: Vec<usize> = actions
         .iter()
         .enumerate()
-        .filter(|(_, a)| matches!(a.action_type, ActionType::CreatePost | ActionType::Reply))
+        .filter(|(_, a)| matches!(a.action_type, ActionType::CreatePost | ActionType::Reply | ActionType::ProposeSolution))
         .filter(|(_, a)| a.content.as_ref().map_or(false, |c| !c.is_empty()))
         .map(|(i, _)| i)
         .collect();
@@ -1386,6 +1396,29 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                 }
             }
         }
+        ActionType::ProposeSolution => {
+            if let Some(content) = &action.content {
+                let post = Post {
+                    id: action.id,
+                    author_id: action.agent_id,
+                    author_name: action.agent_name.clone(),
+                    content: content.clone(),
+                    created_at_round: action.round,
+                    simulated_time: action.simulated_time,
+                    reply_to: None,
+                    repost_of: None,
+                    likes: Vec::new(),
+                    replies: Vec::new(),
+                    reposts: Vec::new(),
+                    hashtags: extract_hashtags(content),
+                };
+                state.world.add_post(post);
+                state.world.solution_ids.push(action.id);
+                if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
+                    agent_state.post_ids.push(action.id);
+                }
+            }
+        }
         ActionType::DoNothing => {}
     }
 
@@ -1434,6 +1467,16 @@ fn describe_action(action: &Action) -> String {
         ActionType::Unfollow => format!("unfollowed someone"),
         ActionType::DoNothing => format!("idle"),
         ActionType::PinMemory => format!("pinned a memory"),
+        ActionType::ProposeSolution => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            format!("proposed solution: \"{preview}\"")
+        }
     }
 }
 
@@ -1512,6 +1555,16 @@ fn describe_action_rich(action: &Action, state: &SimulationState) -> String {
         ActionType::Unfollow => "I unfollowed someone".into(),
         ActionType::DoNothing => "idle".into(),
         ActionType::PinMemory => "pinned a memory".into(),
+        ActionType::ProposeSolution => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            format!("I proposed a solution: \"{preview}\"")
+        }
     }
 }
 

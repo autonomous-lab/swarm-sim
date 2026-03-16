@@ -854,6 +854,102 @@ main {
 .thread-toggle:hover { background: var(--bg-hover); }
 .thread-hidden { display: none; }
 
+/* Challenge banner */
+.challenge-banner {
+  background: linear-gradient(90deg, rgba(210, 153, 34, 0.15), rgba(210, 153, 34, 0.05));
+  border-bottom: 1px solid rgba(210, 153, 34, 0.3);
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.challenge-label {
+  background: #d29922;
+  color: #000;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.challenge-banner .hidden { display: none; }
+
+/* Solutions */
+.solution-card {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(210, 153, 34, 0.3);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  margin-bottom: 10px;
+}
+.solution-rank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, #d29922, #b8860b);
+  color: #000;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 14px;
+}
+.solution-body { flex: 1; min-width: 0; }
+.solution-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.solution-content {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+.solution-stats {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.solution-engagement {
+  color: #d29922;
+  font-weight: 600;
+}
+.action-badge.solution {
+  background: rgba(210, 153, 34, 0.2);
+  color: #d29922;
+}
+.solutions-challenge-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(210, 153, 34, 0.1), rgba(210, 153, 34, 0.03));
+  border: 1px solid rgba(210, 153, 34, 0.25);
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+.solutions-challenge-label {
+  background: #d29922;
+  color: #000;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.solutions-challenge-text {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

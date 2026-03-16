@@ -33,6 +33,8 @@ pub struct SimulationSettings {
     pub scenario_prompt: String,
     #[serde(default)]
     pub random_seed: u64,
+    #[serde(default)]
+    pub challenge_question: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

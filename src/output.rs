@@ -131,6 +131,15 @@ pub fn print_action(action: &Action, verbose: bool) {
             let content = action.content.as_deref().unwrap_or("");
             format!("{} \"{}\"", "PIN".yellow(), content)
         }
+        ActionType::ProposeSolution => {
+            let content = action.content.as_deref().unwrap_or("");
+            let preview = if content.len() > 80 {
+                format!("{}...", &content[..77])
+            } else {
+                content.to_string()
+            };
+            format!("{} \"{}\"", "SOLUTION".yellow().bold(), preview)
+        }
     };
 
     println!(

@@ -84,7 +84,7 @@ function handleAction(action) {
 
   // Update stats
   stats.actions++;
-  if (action.action_type === 'create_post') stats.posts++;
+  if (action.action_type === 'create_post' || action.action_type === 'propose_solution') stats.posts++;
   if (action.action_type === 'like') stats.likes++;
   if (action.action_type === 'reply') stats.replies++;
   if (action.action_type === 'repost') stats.reposts++;
@@ -346,13 +346,14 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   event.target.classList.add('active');
 
-  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content', threads: 'threads-list' };
+  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content', threads: 'threads-list', solutions: 'solutions-list' };
   document.getElementById(contentMap[tab]).classList.add('active');
 
   if (tab === 'trending') refreshTrending();
   if (tab === 'timeline') refreshTimeline();
   if (tab === 'dashboard') refreshDashboard();
   if (tab === 'threads') refreshThreads();
+  if (tab === 'solutions') refreshSolutions();
 }
 
 async function refreshTrending() {
@@ -429,6 +430,32 @@ async function refreshThreads() {
   }
 }
 
+async function refreshSolutions() {
+  const el = document.getElementById('solutions-list');
+  try {
+    const data = await fetchJson('/api/solutions');
+    const solutions = data.solutions || [];
+    const challenge = data.challenge_question;
+
+    if (!challenge) {
+      el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">No challenge question set for this simulation.<br>Add a challenge question when launching to collect agent solutions.</div>';
+      return;
+    }
+
+    let html = `<div class="solutions-challenge-box"><span class="solutions-challenge-label">CHALLENGE</span><span class="solutions-challenge-text">${esc(challenge)}</span></div>`;
+
+    if (solutions.length === 0) {
+      html += '<div style="color:var(--text-muted);padding:20px;text-align:center">No solutions proposed yet. Agents will propose solutions as the simulation runs.</div>';
+    } else {
+      html += solutions.map((s, i) => renderSolution(s, i + 1)).join('');
+    }
+
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">Could not load solutions</div>';
+  }
+}
+
 // ----------------------------------------------------------------
 // Simulation controls
 // ----------------------------------------------------------------
@@ -499,12 +526,14 @@ async function launchSim() {
   }, 3000);
 
   try {
+    const challenge = document.getElementById('launch-challenge').value.trim();
     const body = {
       scenario_prompt: scenario,
       total_rounds: rounds,
       target_agent_count: agents,
     };
     if (seed) body.seed_document_text = seed;
+    if (challenge) body.challenge_question = challenge;
 
     const res = await fetch(`${API}/api/simulation/launch`, {
       method: 'POST',
@@ -529,6 +558,15 @@ async function launchSim() {
       currentStatus = 'preparing';
       updateStatusBadge('preparing');
       updateNewSimButton();
+
+      // Show challenge banner if set
+      const challengeBanner = document.getElementById('challenge-banner');
+      if (challenge) {
+        document.getElementById('challenge-text').textContent = challenge;
+        challengeBanner.classList.remove('hidden');
+      } else {
+        challengeBanner.classList.add('hidden');
+      }
 
       // Close modal after brief success flash
       statusEl.textContent = 'Simulation launched!';

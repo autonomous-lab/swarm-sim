@@ -19,6 +19,7 @@ pub struct LaunchRequest {
     pub total_rounds: Option<u32>,
     pub seed_document_text: Option<String>,
     pub target_agent_count: Option<u32>,
+    pub challenge_question: Option<String>,
 }
 
 pub async fn launch_simulation(
@@ -31,6 +32,7 @@ pub async fn launch_simulation(
     // Build config from base + overrides
     let mut config = base_config.clone();
     config.simulation.scenario_prompt = req.scenario_prompt;
+    config.simulation.challenge_question = req.challenge_question;
     if let Some(rounds) = req.total_rounds {
         config.simulation.total_rounds = rounds;
     }

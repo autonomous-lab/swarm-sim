@@ -408,6 +408,28 @@ function renderEventEntry(event) {
     </div>`;
 }
 
+function renderSolution(solution, rank) {
+  const engagement = solution.engagement || 0;
+  return `
+    <div class="solution-card">
+      <div class="solution-rank">#${rank}</div>
+      <div class="solution-body">
+        <div class="solution-header">
+          <span class="post-author">@${esc(solution.author_name)}</span>
+          <span class="action-badge solution">SOLUTION</span>
+          <span class="post-time">R${solution.created_at_round}</span>
+        </div>
+        <div class="solution-content">${esc(solution.content)}</div>
+        <div class="solution-stats">
+          <span class="solution-stat">${solution.likes || 0} likes</span>
+          <span class="solution-stat">${solution.replies || 0} replies</span>
+          <span class="solution-stat">${solution.reposts || 0} reposts</span>
+          <span class="solution-engagement">${engagement.toFixed(0)} engagement</span>
+        </div>
+      </div>
+    </div>`;
+}
+
 function getActionBadge(actionType) {
   const map = {
     create_post: '<span class="action-badge post">POST</span>',
@@ -416,6 +438,7 @@ function getActionBadge(actionType) {
     repost: '<span class="action-badge repost">REPOST</span>',
     follow: '<span class="action-badge follow">FOLLOW</span>',
     pin_memory: '<span class="action-badge pin">PIN</span>',
+    propose_solution: '<span class="action-badge solution">SOLUTION</span>',
   };
   return map[actionType] || '';
 }

@@ -21,6 +21,7 @@ pub enum ActionType {
     Unfollow,
     DoNothing,
     PinMemory,
+    ProposeSolution,
 }
 
 impl std::fmt::Display for ActionType {
@@ -34,6 +35,7 @@ impl std::fmt::Display for ActionType {
             ActionType::Unfollow => write!(f, "unfollow"),
             ActionType::DoNothing => write!(f, "do_nothing"),
             ActionType::PinMemory => write!(f, "pin_memory"),
+            ActionType::ProposeSolution => write!(f, "propose_solution"),
         }
     }
 }
@@ -172,6 +174,7 @@ pub struct RoundSummary {
     pub new_reposts: usize,
     pub new_follows: usize,
     pub events_injected: usize,
+    pub new_solutions: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +195,7 @@ pub struct WorldState {
     pub simulated_time: DateTime<Utc>,
     pub injected_events: Vec<InjectedEvent>,
     pub round_summaries: Vec<RoundSummary>,
+    pub solution_ids: Vec<Uuid>,
 }
 
 impl WorldState {
@@ -204,6 +208,7 @@ impl WorldState {
             simulated_time: start_time,
             injected_events: Vec::new(),
             round_summaries: Vec::new(),
+            solution_ids: Vec::new(),
         }
     }
 

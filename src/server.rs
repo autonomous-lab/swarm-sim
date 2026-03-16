@@ -61,6 +61,7 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/timeline", get(get_timeline))
         .route("/api/graph", get(get_graph))
         .route("/api/dashboard", get(get_dashboard))
+        .route("/api/solutions", get(get_solutions))
         .route("/api/syntheses", get(get_syntheses))
         .route("/api/simulation/pause", post(pause_simulation))
         .route("/api/simulation/resume", post(resume_simulation))
@@ -415,6 +416,44 @@ async fn get_dashboard(State(state): State<AppState>) -> impl IntoResponse {
         total_actions: s.total_actions,
         total_agents: s.agents.len(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Solutions endpoint
+// ---------------------------------------------------------------------------
+
+async fn get_solutions(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let mut solutions: Vec<serde_json::Value> = s
+        .world
+        .solution_ids
+        .iter()
+        .filter_map(|id| s.world.posts.get(id))
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "author_name": p.author_name,
+                "content": p.content,
+                "created_at_round": p.created_at_round,
+                "likes": p.likes.len(),
+                "replies": p.replies.len(),
+                "reposts": p.reposts.len(),
+                "engagement": p.engagement_score(),
+            })
+        })
+        .collect();
+    solutions.sort_by(|a, b| {
+        b["engagement"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&a["engagement"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let challenge = s.config.simulation.challenge_question.clone();
+    Json(serde_json::json!({
+        "challenge_question": challenge,
+        "solutions": solutions,
+    }))
 }
 
 // ---------------------------------------------------------------------------

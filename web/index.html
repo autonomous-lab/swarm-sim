@@ -33,6 +33,12 @@
     <span id="scenario-text"></span>
   </div>
 
+  <!-- Challenge banner -->
+  <div id="challenge-banner" class="challenge-banner hidden">
+    <span class="challenge-label">CHALLENGE</span>
+    <span id="challenge-text"></span>
+  </div>
+
   <!-- Synthesis panel -->
   <div id="synthesis-panel" class="synthesis-panel hidden">
     <div class="synthesis-header" onclick="toggleSynthesis()">
@@ -59,6 +65,10 @@
         <div class="launch-field">
           <label for="launch-seed">Seed Document <span class="optional-tag">optional</span></label>
           <textarea id="launch-seed" rows="8" placeholder="Paste a news article, background context, or reference text to ground the simulation..."></textarea>
+        </div>
+        <div class="launch-field">
+          <label for="launch-challenge">Challenge Question <span class="optional-tag">optional</span></label>
+          <textarea id="launch-challenge" rows="3" placeholder="Pose a challenge for agents to propose solutions to... (e.g. 'How can we make AI more accessible to developing countries?')"></textarea>
         </div>
         <div class="launch-params-row">
           <div class="launch-field launch-param">
@@ -105,6 +115,7 @@
         <button class="tab-btn" onclick="switchTab('timeline')">Timeline</button>
         <button class="tab-btn" onclick="switchTab('dashboard')">Dashboard</button>
         <button class="tab-btn" onclick="switchTab('threads')">Threads</button>
+        <button class="tab-btn" onclick="switchTab('solutions')">Solutions</button>
       </div>
       <div id="feed-content">
         <div id="feed-list" class="tab-content active"></div>
@@ -112,6 +123,7 @@
         <div id="timeline-list" class="tab-content"></div>
         <div id="dashboard-content" class="tab-content"></div>
         <div id="threads-list" class="tab-content"></div>
+        <div id="solutions-list" class="tab-content"></div>
       </div>
     </section>
 

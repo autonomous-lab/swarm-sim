@@ -6,7 +6,6 @@ use anyhow::Result;
 use crate::agent::{AgentProfile, Tier};
 use crate::engine::SimulationState;
 use crate::llm::LlmClient;
-use crate::world::RoundSummary;
 
 /// Generate a final markdown report from the simulation results.
 pub async fn generate_report(
@@ -78,12 +77,56 @@ pub async fn generate_report(
         })
         .collect();
 
+    // Top solutions (if challenge mode)
+    let solutions_section = if !state.world.solution_ids.is_empty() {
+        let mut solution_posts: Vec<_> = state
+            .world
+            .solution_ids
+            .iter()
+            .filter_map(|id| state.world.posts.get(id))
+            .collect();
+        solution_posts.sort_by(|a, b| {
+            b.engagement_score()
+                .partial_cmp(&a.engagement_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top: Vec<String> = solution_posts
+            .iter()
+            .take(10)
+            .map(|p| {
+                format!(
+                    "- @{}: \"{}\" (likes:{}, replies:{}, reposts:{})",
+                    p.author_name,
+                    truncate(&p.content, 150),
+                    p.likes.len(),
+                    p.replies.len(),
+                    p.reposts.len(),
+                )
+            })
+            .collect();
+        format!(
+            "\nTOP SOLUTIONS ({} total):\n{}",
+            state.world.solution_ids.len(),
+            top.join("\n")
+        )
+    } else {
+        String::new()
+    };
+
+    let challenge_section = state
+        .config
+        .simulation
+        .challenge_question
+        .as_deref()
+        .map(|q| format!("\nCHALLENGE QUESTION: {q}"))
+        .unwrap_or_default();
+
     let scenario = &state.config.simulation.scenario_prompt;
 
     let prompt = format!(
         r#"Generate a detailed simulation report in Markdown format.
 
-SCENARIO: {scenario}
+SCENARIO: {scenario}{challenge_section}
 
 STATISTICS:
 - Total rounds: {total_rounds}
@@ -99,13 +142,14 @@ VIP AGENTS (TIER 1):
 
 ROUND TRAJECTORY:
 {round_trajectory}
+{solutions_section}
 
 Generate a comprehensive report with these sections:
 1. Executive Summary (3-5 key findings)
 2. Timeline of Key Events (major shifts and inflection points)
 3. Agent Analysis (VIP behavior, most active, sentiment distribution)
 4. Viral Content Analysis (top posts, cascade patterns)
-5. Network Dynamics (opinion leaders, echo chambers)
+5. Network Dynamics (opinion leaders, echo chambers){solutions_report_section}
 6. Methodology Notes (tiers used, models, limitations)"#,
         t1 = tier_counts.0,
         t2 = tier_counts.1,
@@ -113,6 +157,12 @@ Generate a comprehensive report with these sections:
         top_posts = top_posts.join("\n"),
         vip_agents = vip_agents.join("\n"),
         round_trajectory = round_data.join("\n"),
+        solutions_section = solutions_section,
+        solutions_report_section = if !state.world.solution_ids.is_empty() {
+            "\n7. Top Proposed Solutions (ranked by community engagement, analysis of themes)"
+        } else {
+            ""
+        },
     );
 
     let system = "You are an expert analyst generating a simulation report. \
