@@ -173,6 +173,7 @@ async fn cmd_extract(
         &llm,
         &documents,
         &config.simulation.scenario_prompt,
+        40,
     )
     .await?;
 
@@ -328,6 +329,7 @@ async fn cmd_run(
         &llm,
         &documents,
         &config.simulation.scenario_prompt,
+        40,
     )
     .await?;
 

@@ -18,6 +18,7 @@ pub struct LaunchRequest {
     pub scenario_prompt: String,
     pub total_rounds: Option<u32>,
     pub seed_document_text: Option<String>,
+    pub target_agent_count: Option<u32>,
 }
 
 pub async fn launch_simulation(
@@ -69,9 +70,10 @@ pub async fn launch_simulation(
     }
 
     // Extract entities and generate agents
-    tracing::info!("Launcher: extracting entities...");
+    let target_agents = req.target_agent_count.unwrap_or(40) as usize;
+    tracing::info!("Launcher: extracting stakeholders (target: {target_agents} agents)...");
     let agents =
-        parser::extract_and_generate_agents(&llm, &documents, &config.simulation.scenario_prompt)
+        parser::extract_and_generate_agents(&llm, &documents, &config.simulation.scenario_prompt, target_agents)
             .await?;
 
     tracing::info!("Launcher: generated {} agents", agents.len());

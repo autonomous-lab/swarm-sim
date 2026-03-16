@@ -233,10 +233,45 @@ function updateTokenDisplay() {
 
 function openLaunchModal() {
   document.getElementById('launch-modal').classList.add('active');
+  updateCostEstimate();
 }
 
 function closeLaunchModal() {
   document.getElementById('launch-modal').classList.remove('active');
+}
+
+function updateCostEstimate() {
+  const rounds = parseInt(document.getElementById('launch-rounds').value) || 10;
+  const agents = parseInt(document.getElementById('launch-agents').value) || 40;
+
+  // Tier distribution: ~10% T1, ~20% T2, ~70% T3
+  const t1 = Math.max(3, Math.round(agents * 0.10));
+  const t2 = Math.max(3, Math.round(agents * 0.20));
+  const t3 = Math.max(1, agents - t1 - t2);
+
+  // API calls per round: T1=individual, T2=batch of 8, T3=batch of 25
+  const callsPerRound = t1 + Math.ceil(t2 / 8) + Math.ceil(t3 / 25);
+  const extractionCalls = 2; // stakeholder + figurant generation
+  const totalCalls = (callsPerRound * rounds) + extractionCalls;
+
+  // Token estimation (avg per call)
+  // T1: ~1500 in, ~400 out | T2: ~3000 in, ~1500 out | T3: ~5000 in, ~3000 out
+  const tokensIn = rounds * (t1 * 1500 + Math.ceil(t2/8) * 3000 + Math.ceil(t3/25) * 5000) + 12000;
+  const tokensOut = rounds * (t1 * 400 + Math.ceil(t2/8) * 1500 + Math.ceil(t3/25) * 3000) + 8000;
+  const totalTokens = tokensIn + tokensOut;
+
+  // Cost: Gemini 2.0 Flash via OpenRouter: $0.10/1M in, $0.40/1M out
+  const costIn = (tokensIn / 1_000_000) * 0.10;
+  const costOut = (tokensOut / 1_000_000) * 0.40;
+  const totalCost = costIn + costOut;
+
+  document.getElementById('est-calls').textContent = `~${totalCalls}`;
+  document.getElementById('est-tokens').textContent = totalTokens > 1_000_000
+    ? `~${(totalTokens / 1_000_000).toFixed(1)}M`
+    : `~${Math.round(totalTokens / 1000)}K`;
+  document.getElementById('est-cost').textContent = totalCost < 0.01
+    ? `<$0.01`
+    : `~$${totalCost.toFixed(2)}`;
 }
 
 function updateNewSimButton() {
@@ -387,7 +422,8 @@ async function stopSim() {
 
 async function launchSim() {
   const scenario = document.getElementById('launch-scenario').value.trim();
-  const rounds = parseInt(document.getElementById('launch-rounds').value) || 5;
+  const rounds = parseInt(document.getElementById('launch-rounds').value) || 10;
+  const agents = parseInt(document.getElementById('launch-agents').value) || 40;
   const seed = document.getElementById('launch-seed').value.trim();
   const statusEl = document.getElementById('launch-status');
 
@@ -397,17 +433,33 @@ async function launchSim() {
     return;
   }
 
-  // Disable button, show loading
+  // Disable button, show loading with progress steps
   const btn = document.getElementById('btn-launch');
   btn.disabled = true;
   btn.textContent = 'Launching...';
-  statusEl.textContent = 'Extracting entities and generating agents...';
+
+  const steps = [
+    'Analyzing scenario...',
+    'Extracting stakeholder personas...',
+    `Generating ${agents} agent profiles...`,
+    'Building social graph...',
+    'Starting simulation engine...',
+  ];
+  let stepIndex = 0;
+  statusEl.textContent = steps[0];
   statusEl.className = 'launch-status loading';
+  const stepTimer = setInterval(() => {
+    stepIndex++;
+    if (stepIndex < steps.length) {
+      statusEl.textContent = steps[stepIndex];
+    }
+  }, 3000);
 
   try {
     const body = {
       scenario_prompt: scenario,
       total_rounds: rounds,
+      target_agent_count: agents,
     };
     if (seed) body.seed_document_text = seed;
 
@@ -417,6 +469,7 @@ async function launchSim() {
       body: JSON.stringify(body),
     });
     const data = await res.json();
+    clearInterval(stepTimer);
 
     if (res.ok) {
       // Reset UI state
@@ -446,6 +499,7 @@ async function launchSim() {
       statusEl.className = 'launch-status error';
     }
   } catch (e) {
+    clearInterval(stepTimer);
     statusEl.textContent = 'Network error: ' + e.message;
     statusEl.className = 'launch-status error';
   } finally {

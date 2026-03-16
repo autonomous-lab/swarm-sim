@@ -128,6 +128,7 @@ pub async fn extract_and_generate_agents(
     llm: &LlmClient,
     documents: &[String],
     scenario: &str,
+    target_count: usize,
 ) -> Result<Vec<AgentProfile>> {
     // Step 1: Extract stakeholder PEOPLE from documents
     let mut all_stakeholders: Vec<ExtractedStakeholder> = Vec::new();
@@ -286,10 +287,10 @@ JSON format:
     }
 
     // Step 3: Generate additional figurant agents (general public)
-    let figurant_count = (agents.len() * 2).max(40).min(100);
+    let figurant_target = target_count.max(agents.len());
     let existing_count = agents.len();
-    if figurant_count > existing_count {
-        let extra = figurant_count - existing_count;
+    if figurant_target > existing_count {
+        let extra = figurant_target - existing_count;
         tracing::info!("Generating {extra} additional figurant agents");
 
         let system = r#"You generate realistic everyday social media users — regular people, NOT public figures.

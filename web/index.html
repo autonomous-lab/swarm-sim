@@ -54,21 +54,30 @@
       <div class="launch-modal-body">
         <div class="launch-field">
           <label for="launch-scenario">Scenario Prompt</label>
-          <textarea id="launch-scenario" rows="5" placeholder="Describe the scenario to simulate...">Simulate the public reaction on social media after OpenAI announces that GPT-5 will cost $200/month for the Pro tier, while making the free tier significantly more limited. Explore reactions from AI developers, startup founders, students, competitors (Google, Anthropic, Meta), tech journalists, and everyday users debating accessibility, pricing, and the future of AI democratization.</textarea>
+          <textarea id="launch-scenario" rows="7" placeholder="Describe the scenario to simulate...">Simulate the public reaction on social media after OpenAI announces that GPT-5 will cost $200/month for the Pro tier, while making the free tier significantly more limited. Explore reactions from AI developers, startup founders, students, competitors (Google, Anthropic, Meta), tech journalists, and everyday users debating accessibility, pricing, and the future of AI democratization.</textarea>
         </div>
         <div class="launch-field">
           <label for="launch-seed">Seed Document <span class="optional-tag">optional</span></label>
-          <textarea id="launch-seed" rows="5" placeholder="Paste a news article, background context, or reference text to ground the simulation...">OpenAI CEO Sam Altman announced today that GPT-5, codenamed "Orion," will launch next month with a new pricing structure. The Pro tier jumps from $20/month to $200/month, offering unlimited GPT-5 access, advanced reasoning, and a 1M token context window. The free tier will be restricted to GPT-4o-mini with 10 messages per day. Altman stated: "Building frontier AI is extraordinarily expensive. We need sustainable pricing to continue pushing the boundaries." The announcement comes as Google DeepMind releases Gemini 3 Ultra for free, and Anthropic offers Claude 4 at $30/month. Tech Twitter erupted immediately, with #OpenAIGreed and #GPT5Pricing trending within hours. YC-backed startups report scrambling to evaluate alternatives, while enterprise customers express concerns about vendor lock-in.</textarea>
+          <textarea id="launch-seed" rows="8" placeholder="Paste a news article, background context, or reference text to ground the simulation..."></textarea>
+        </div>
+        <div class="launch-params-row">
+          <div class="launch-field launch-param">
+            <label for="launch-rounds">Rounds</label>
+            <input type="number" id="launch-rounds" value="5" min="1" max="100" oninput="updateCostEstimate()">
+          </div>
+          <div class="launch-field launch-param">
+            <label for="launch-agents">Agents</label>
+            <input type="number" id="launch-agents" value="10" min="5" max="200" oninput="updateCostEstimate()">
+          </div>
+          <div class="launch-estimate" id="launch-estimate">
+            <div class="estimate-row"><span class="estimate-label">API Calls</span><span id="est-calls">~125</span></div>
+            <div class="estimate-row"><span class="estimate-label">Tokens</span><span id="est-tokens">~500K</span></div>
+            <div class="estimate-row"><span class="estimate-label">Cost</span><span id="est-cost">~$0.08</span></div>
+          </div>
         </div>
         <div class="launch-bottom-row">
-          <div class="launch-field launch-rounds-field">
-            <label for="launch-rounds">Rounds</label>
-            <input type="number" id="launch-rounds" value="10" min="1" max="100">
-          </div>
-          <div class="launch-actions">
-            <div id="launch-status" class="launch-status"></div>
-            <button class="primary launch-btn" id="btn-launch" onclick="launchSim()">Launch Simulation</button>
-          </div>
+          <div id="launch-status" class="launch-status"></div>
+          <button class="primary launch-btn" id="btn-launch" onclick="launchSim()">Launch Simulation</button>
         </div>
       </div>
     </div>

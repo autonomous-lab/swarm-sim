@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -664,6 +664,9 @@ impl SimulationEngine {
             }
         }
 
+        // Dedup near-duplicate posts within this tier
+        dedup_actions(&mut all_actions);
+
         // Apply actions to world state
         let simulated_time = self.state.read().await.world.simulated_time;
         for action in &mut all_actions {
@@ -1128,6 +1131,155 @@ fn convert_batch_actions(
     }
 
     actions
+}
+
+// ---------------------------------------------------------------------------
+// Content deduplication
+// ---------------------------------------------------------------------------
+
+/// Remove near-duplicate posts within a tier's actions.
+/// Uses Jaccard similarity on keyword sets. Duplicate posts are converted to DoNothing.
+fn dedup_actions(actions: &mut Vec<Action>) {
+    const STOP_WORDS: &[&str] = &[
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "has", "his", "how", "its", "may",
+        "new", "now", "old", "see", "way", "who", "did", "get", "got", "him",
+        "let", "say", "she", "too", "use", "this", "that", "with", "have",
+        "from", "they", "been", "said", "each", "will", "them", "then",
+        "what", "when", "more", "some", "just", "about", "into", "over",
+        "also", "than", "very", "could", "would", "should", "being", "there",
+        "their", "which", "these", "those", "other", "like", "really",
+        "going", "think", "make", "know", "need", "want", "take", "come",
+        "people", "time", "it's", "don't", "i'm", "we're", "they're",
+    ];
+
+    fn extract_keywords(text: &str) -> HashSet<String> {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'')
+            .filter(|w| w.len() > 3 && !STOP_WORDS.contains(w))
+            .map(|w| w.to_string())
+            .collect()
+    }
+
+    // Collect indices of post/reply actions that have content
+    let post_indices: Vec<usize> = actions
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a.action_type, ActionType::CreatePost | ActionType::Reply))
+        .filter(|(_, a)| a.content.as_ref().map_or(false, |c| !c.is_empty()))
+        .map(|(i, _)| i)
+        .collect();
+
+    if post_indices.len() < 2 {
+        return;
+    }
+
+    let keyword_sets: Vec<(usize, HashSet<String>)> = post_indices
+        .iter()
+        .map(|&i| {
+            let kw = extract_keywords(actions[i].content.as_deref().unwrap_or(""));
+            (i, kw)
+        })
+        .collect();
+
+    let mut duplicate_indices: HashSet<usize> = HashSet::new();
+
+    // Also track word frequency across all posts to detect LLM-isms
+    let mut word_freq: HashMap<String, usize> = HashMap::new();
+    for (_, kws) in &keyword_sets {
+        for w in kws {
+            *word_freq.entry(w.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Words appearing in >50% of posts are LLM-isms (e.g. "data-driven", "innovative")
+    let total_posts = keyword_sets.len();
+    let overused_words: HashSet<String> = word_freq
+        .iter()
+        .filter(|(_, &count)| count > 1 && count as f32 / total_posts as f32 > 0.5)
+        .map(|(word, _)| word.clone())
+        .collect();
+
+    if !overused_words.is_empty() {
+        tracing::info!(
+            "Dedup: detected overused words (in >50% of posts): {:?}",
+            overused_words.iter().take(10).collect::<Vec<_>>()
+        );
+    }
+
+    // Jaccard similarity check (excluding overused words)
+    for j in 1..keyword_sets.len() {
+        let idx_j = keyword_sets[j].0;
+        if duplicate_indices.contains(&idx_j) {
+            continue;
+        }
+
+        let set_b: HashSet<&String> = keyword_sets[j]
+            .1
+            .iter()
+            .filter(|w| !overused_words.contains(*w))
+            .collect();
+
+        for i in 0..j {
+            let idx_i = keyword_sets[i].0;
+            if duplicate_indices.contains(&idx_i) {
+                continue;
+            }
+
+            let set_a: HashSet<&String> = keyword_sets[i]
+                .1
+                .iter()
+                .filter(|w| !overused_words.contains(*w))
+                .collect();
+
+            if set_a.is_empty() || set_b.is_empty() {
+                continue;
+            }
+
+            let intersection = set_a.intersection(&set_b).count();
+            let union = set_a.union(&set_b).count();
+            let similarity = intersection as f32 / union as f32;
+
+            if similarity > 0.35 {
+                duplicate_indices.insert(idx_j);
+                break;
+            }
+        }
+    }
+
+    // Also flag posts that are composed mostly of overused words (LLM slop)
+    if !overused_words.is_empty() {
+        for (idx, kws) in &keyword_sets {
+            if duplicate_indices.contains(idx) {
+                continue;
+            }
+            if kws.is_empty() {
+                continue;
+            }
+            let overused_count = kws.iter().filter(|w| overused_words.contains(*w)).count();
+            // If >60% of this post's keywords are overused, it's generic slop
+            if overused_count as f32 / kws.len() as f32 > 0.6 && kws.len() > 3 {
+                duplicate_indices.insert(*idx);
+            }
+        }
+    }
+
+    let deduped_count = duplicate_indices.len();
+    if deduped_count > 0 {
+        for &i in &duplicate_indices {
+            tracing::debug!(
+                "Dedup: converting duplicate from @{} to do_nothing: {:?}",
+                actions[i].agent_name,
+                actions[i].content.as_deref().unwrap_or("").chars().take(60).collect::<String>()
+            );
+            actions[i].action_type = ActionType::DoNothing;
+            actions[i].content = None;
+        }
+        tracing::info!(
+            "Dedup: removed {deduped_count}/{} near-duplicate posts in tier",
+            post_indices.len()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

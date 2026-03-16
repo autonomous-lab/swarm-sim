@@ -466,6 +466,8 @@ RULES:
 - You may take 0-3 actions.
 - NO hashtags (unless you are an activist, then max 1). Real people rarely use hashtags.
 - Use contractions (don't, can't, it's). Use lowercase when casual. Real tweets are messy.
+- BANNED PHRASES (never use): "raises questions", "remains to be seen", "data-driven", "innovative",
+  "game-changer", "implications", "landscape", "paradigm", "noteworthy", "unprecedented", "leveraging"
 
 ACTIONS:
 - create_post: "content" field
@@ -602,12 +604,6 @@ HASHTAG RULE: Almost NO ONE should use hashtags. Only activists may use MAX 1 pe
 
 LANGUAGE RULE: Use contractions (don't, can't, it's, they're). Use lowercase when casual. Real tweets are messy and imperfect.
 
-ANTI-REPETITION (CRITICAL):
-- Each user MUST say something UNIQUE. NO two users can make the same point.
-- NEVER copy phrases or arguments from another user in this batch.
-- Check each user's Memory field — they must say something DIFFERENT from previous rounds.
-- Vary reactions: not everyone reacts the same way. Some agree, some disagree, some joke, some panic.
-
 Most users should like/repost/reply — NOT everyone needs to create_post.
 Use exact post UUIDs for reply/like/repost.
 
@@ -620,6 +616,15 @@ ACTIONS (0-2 per user):
 - repost: "target_post_id"
 - follow: "target_agent_id"
 - do_nothing: skip
+
+CRITICAL — UNIQUENESS RULES (violations will be rejected):
+1. Each user MUST express a COMPLETELY DIFFERENT thought. NO two users can share the same point, angle, or conclusion.
+2. BANNED PHRASES — do NOT use these overused LLM clichés in ANY post:
+   "raises questions", "remains to be seen", "data-driven", "innovative", "game-changer",
+   "implications", "landscape", "paradigm", "noteworthy", "significant", "robust",
+   "leveraging", "ecosystem", "stakeholders", "framework", "unprecedented"
+3. Each user must pick a DIFFERENT angle: personal story, joke, complaint, conspiracy theory, practical concern, emotional outburst, comparison, question, disbelief, acceptance, etc.
+4. If a user is a Lurker or Normie, they should NOT write like an analyst. "lol what" is better than a paragraph.
 
 JSON ONLY (pin_memory field is optional — omit it or set to null if nothing to pin):
 {{
