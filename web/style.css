@@ -950,6 +950,82 @@ main {
   color: var(--text-primary);
 }
 
+/* ================================================================
+   Network Graph
+   ================================================================ */
+
+#graph-content {
+  position: relative;
+  padding: 0 !important;
+  display: none;
+  height: 100%;
+  overflow: hidden;
+}
+#graph-content.active { display: flex; flex-direction: column; }
+
+#graph-container {
+  flex: 1;
+  width: 100%;
+  min-height: 500px;
+  background: #0d1117;
+  border-radius: var(--radius);
+  position: relative;
+  overflow: hidden;
+}
+#graph-container svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.graph-tooltip {
+  position: absolute;
+  background: rgba(13, 17, 23, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  pointer-events: none;
+  z-index: 100;
+  max-width: 200px;
+}
+
+.graph-legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(13, 17, 23, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  z-index: 50;
+}
+.graph-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+}
+.graph-legend-item:last-child { margin-bottom: 0; }
+.graph-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.graph-legend-total {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

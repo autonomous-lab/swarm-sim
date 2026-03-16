@@ -449,3 +449,180 @@ function esc(str) {
   div.textContent = str;
   return div.innerHTML;
 }
+
+// ================================================================
+// Network Graph (D3.js force-directed)
+// ================================================================
+
+let _graphSimulation = null;
+
+function renderNetworkGraph(data, container) {
+  // Clear previous
+  container.innerHTML = '';
+  if (_graphSimulation) { _graphSimulation.stop(); _graphSimulation = null; }
+
+  if (!data.nodes || data.nodes.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center">No agents yet. Launch a simulation to see the network.</div>';
+    return;
+  }
+
+  const width = container.clientWidth || 800;
+  const height = container.clientHeight || 600;
+
+  const tierColor = { tier1: '#f59e0b', tier2: '#3b82f6', tier3: '#6b7280' };
+  const tierLabel = { tier1: 'VIP', tier2: 'Standard', tier3: 'Figurant' };
+  const tierRadius = { tier1: 14, tier2: 8, tier3: 4 };
+
+  // Count tiers
+  const tierCounts = { tier1: 0, tier2: 0, tier3: 0 };
+  data.nodes.forEach(n => { tierCounts[n.tier] = (tierCounts[n.tier] || 0) + 1; });
+
+  // Count connections per node
+  const inDegree = {};
+  const outDegree = {};
+  data.edges.forEach(e => {
+    outDegree[e.source] = (outDegree[e.source] || 0) + 1;
+    inDegree[e.target] = (inDegree[e.target] || 0) + 1;
+  });
+
+  // Clone data for D3 (it mutates objects)
+  const nodes = data.nodes.map(n => ({ ...n }));
+  const links = data.edges.map(e => ({ source: e.source, target: e.target }));
+
+  // SVG
+  const svg = d3.select(container)
+    .append('svg')
+    .attr('width', width)
+    .attr('height', height)
+    .attr('viewBox', [0, 0, width, height]);
+
+  // Zoom layer
+  const g = svg.append('g');
+  svg.call(d3.zoom()
+    .scaleExtent([0.2, 5])
+    .on('zoom', (event) => g.attr('transform', event.transform))
+  );
+
+  // Arrow marker
+  svg.append('defs').append('marker')
+    .attr('id', 'arrowhead')
+    .attr('viewBox', '0 -5 10 10')
+    .attr('refX', 20)
+    .attr('refY', 0)
+    .attr('markerWidth', 6)
+    .attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,-4L10,0L0,4')
+    .attr('fill', '#555');
+
+  // Force simulation
+  const simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(d => d.tier === 'tier1' ? -300 : d.tier === 'tier2' ? -150 : -50))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collide', d3.forceCollide().radius(d => tierRadius[d.tier] + 4));
+
+  _graphSimulation = simulation;
+
+  // Links
+  const link = g.append('g')
+    .selectAll('line')
+    .data(links)
+    .join('line')
+    .attr('stroke', '#333')
+    .attr('stroke-opacity', 0.3)
+    .attr('stroke-width', 0.5)
+    .attr('marker-end', 'url(#arrowhead)');
+
+  // Node groups
+  const node = g.append('g')
+    .selectAll('g')
+    .data(nodes)
+    .join('g')
+    .call(d3.drag()
+      .on('start', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on('end', (event, d) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      })
+    );
+
+  // Node circles
+  node.append('circle')
+    .attr('r', d => tierRadius[d.tier])
+    .attr('fill', d => tierColor[d.tier])
+    .attr('stroke', d => d.tier === 'tier1' ? '#fbbf24' : 'transparent')
+    .attr('stroke-width', d => d.tier === 'tier1' ? 3 : 0)
+    .attr('opacity', d => d.tier === 'tier3' ? 0.6 : 1);
+
+  // VIP labels (always visible)
+  node.filter(d => d.tier === 'tier1')
+    .append('text')
+    .text(d => d.label)
+    .attr('x', d => tierRadius[d.tier] + 4)
+    .attr('y', 4)
+    .attr('fill', '#f59e0b')
+    .attr('font-size', '11px')
+    .attr('font-weight', '600')
+    .style('pointer-events', 'none');
+
+  // Tooltip
+  const tooltip = d3.select(container)
+    .append('div')
+    .attr('class', 'graph-tooltip')
+    .style('opacity', 0);
+
+  node.on('mouseover', (event, d) => {
+    const followers = inDegree[d.id] || 0;
+    const following = outDegree[d.id] || 0;
+    tooltip.transition().duration(150).style('opacity', 1);
+    tooltip.html(`
+      <strong>${d.label}</strong><br>
+      <span style="color:${tierColor[d.tier]}">${tierLabel[d.tier]}</span><br>
+      ${followers} followers &middot; ${following} following
+    `)
+      .style('left', (event.offsetX + 12) + 'px')
+      .style('top', (event.offsetY - 10) + 'px');
+
+    // Highlight connected
+    link.attr('stroke-opacity', l =>
+      l.source.id === d.id || l.target.id === d.id ? 0.8 : 0.1
+    ).attr('stroke', l =>
+      l.source.id === d.id || l.target.id === d.id ? tierColor[d.tier] : '#333'
+    );
+  })
+  .on('mouseout', () => {
+    tooltip.transition().duration(300).style('opacity', 0);
+    link.attr('stroke-opacity', 0.3).attr('stroke', '#333');
+  });
+
+  // Tick
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+
+  // Legend
+  const legend = d3.select(container)
+    .append('div')
+    .attr('class', 'graph-legend');
+
+  ['tier1', 'tier2', 'tier3'].forEach(tier => {
+    legend.append('div')
+      .attr('class', 'graph-legend-item')
+      .html(`<span class="graph-legend-dot" style="background:${tierColor[tier]}"></span>${tierLabel[tier]} (${tierCounts[tier]})`);
+  });
+
+  legend.append('div')
+    .attr('class', 'graph-legend-item graph-legend-total')
+    .html(`${data.edges.length} connections`);
+}

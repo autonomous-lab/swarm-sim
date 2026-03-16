@@ -122,6 +122,7 @@ function handleRoundEnd(msg) {
 
   if (currentTab === 'timeline') refreshTimeline();
   if (currentTab === 'dashboard') refreshDashboard();
+  if (currentTab === 'graph') refreshGraph();
   refreshTrending();
 }
 
@@ -143,6 +144,7 @@ function handleSimEnd(msg) {
   updateNewSimButton();
   updateContinueVisibility();
   if (currentTab === 'dashboard') refreshDashboard();
+  if (currentTab === 'graph') refreshGraph();
 }
 
 // ----------------------------------------------------------------
@@ -254,10 +256,10 @@ function updateCostEstimate() {
   const extractionCalls = 2; // stakeholder + figurant generation
   const totalCalls = (callsPerRound * rounds) + extractionCalls;
 
-  // Token estimation (avg per call)
-  // T1: ~1500 in, ~400 out | T2: ~3000 in, ~1500 out | T3: ~5000 in, ~3000 out
-  const tokensIn = rounds * (t1 * 1500 + Math.ceil(t2/8) * 3000 + Math.ceil(t3/25) * 5000) + 12000;
-  const tokensOut = rounds * (t1 * 400 + Math.ceil(t2/8) * 1500 + Math.ceil(t3/25) * 3000) + 8000;
+  // Token estimation per agent (accounting for batch overhead)
+  // T1: ~1500 in, ~400 out per agent | T2: ~500 in, ~200 out per agent | T3: ~200 in, ~120 out per agent
+  const tokensIn = rounds * (t1 * 1500 + t2 * 500 + t3 * 200) + 12000;
+  const tokensOut = rounds * (t1 * 400 + t2 * 200 + t3 * 120) + 8000;
   const totalTokens = tokensIn + tokensOut;
 
   // Cost: Gemini 2.0 Flash via OpenRouter: $0.10/1M in, $0.40/1M out
@@ -346,7 +348,7 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   event.target.classList.add('active');
 
-  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content', threads: 'threads-list', solutions: 'solutions-list' };
+  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content', threads: 'threads-list', solutions: 'solutions-list', graph: 'graph-content' };
   document.getElementById(contentMap[tab]).classList.add('active');
 
   if (tab === 'trending') refreshTrending();
@@ -354,6 +356,7 @@ function switchTab(tab) {
   if (tab === 'dashboard') refreshDashboard();
   if (tab === 'threads') refreshThreads();
   if (tab === 'solutions') refreshSolutions();
+  if (tab === 'graph') refreshGraph();
 }
 
 async function refreshTrending() {
@@ -453,6 +456,17 @@ async function refreshSolutions() {
     el.innerHTML = html;
   } catch (e) {
     el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">Could not load solutions</div>';
+  }
+}
+
+async function refreshGraph() {
+  const container = document.getElementById('graph-container');
+  if (!container) return;
+  try {
+    const data = await fetchJson('/api/graph');
+    renderNetworkGraph(data, container);
+  } catch (e) {
+    container.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center">No graph data available yet. Launch a simulation first.</div>';
   }
 }
 
