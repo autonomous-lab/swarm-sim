@@ -443,14 +443,18 @@ async fn cmd_run(
 
     // --- Phase 7: Generate report ---
     tracing::info!("Generating report...");
-    let sim_state = state.read().await;
-    let report_path = report::save_report(
-        &llm,
-        &sim_state,
-        &config.output.output_dir,
-        &config.output.report_file,
-    )
-    .await?;
+    let report_path = {
+        let sim_state = state.read().await;
+        let path = report::save_report(
+            &llm,
+            &sim_state,
+            &config.output.output_dir,
+            &config.output.report_file,
+        )
+        .await?;
+        path
+        // Read lock dropped here
+    };
     tracing::info!("Report saved: {report_path}");
 
     println!("\nSimulation complete.");
