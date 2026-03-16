@@ -130,15 +130,13 @@ pub async fn extract_and_generate_agents(
     scenario: &str,
     target_count: usize,
 ) -> Result<Vec<AgentProfile>> {
-    // Step 1: Extract stakeholder PEOPLE from documents
-    let mut all_stakeholders: Vec<ExtractedStakeholder> = Vec::new();
-
     let doc_text = documents.join("\n\n---\n\n");
     let doc_preview = if doc_text.len() > 6000 { &doc_text[..6000] } else { &doc_text };
 
-    tracing::info!("Extracting stakeholder personas from scenario...");
+    tracing::info!("Extracting stakeholders + figurants in parallel...");
 
-    let system = r#"You generate realistic PEOPLE who would react to a scenario on social media.
+    // --- Fire both LLM calls in parallel ---
+    let stakeholder_system = r#"You generate realistic PEOPLE who would react to a scenario on social media.
 CRITICAL RULES:
 - Every stakeholder MUST be a PERSON (human being), NOT an organization, product, or service.
 - If the scenario mentions companies/products (e.g. "Google", "Tesla", "iPhone"), create PEOPLE who work at, use, or are affected by them — NOT the company itself.
@@ -148,7 +146,7 @@ CRITICAL RULES:
 - Diverse ages, genders, nationalities, professions.
 Respond with ONLY valid JSON."#;
 
-    let user = format!(
+    let stakeholder_user = format!(
         r#"Scenario: {scenario}
 
 Background context:
@@ -169,7 +167,39 @@ JSON format:
 ]}}"#
     );
 
-    match llm.call_extraction(system, &user, 8192).await {
+    // Estimate figurant count: assume ~12 stakeholders, generate the rest
+    let estimated_figurants = target_count.saturating_sub(12).max(5);
+
+    let figurant_system = r#"You generate realistic everyday social media users — regular people, NOT public figures.
+Each person must feel REAL: specific job, specific emotional reaction to the scenario.
+Give them realistic names and Twitter-style usernames.
+Respond with ONLY valid JSON."#;
+
+    let figurant_user = format!(
+        r#"Generate {estimated_figurants} diverse everyday social media users who would tweet about this scenario:
+{scenario}
+
+These are REGULAR PEOPLE (not experts or public figures). Mix of:
+- People directly affected (lost access, disrupted workflow, financial impact)
+- People with strong opinions (angry, amused, scared, opportunistic)
+- Casual observers (confused, making jokes, sharing memes)
+- People in different countries, ages (18-70), professions
+
+Each person should have a SPECIFIC emotional reaction, not generic "interested observer".
+
+JSON format:
+{{"profiles": [{{"name": "Full Name", "username": "twitter_handle", "bio": "short Twitter bio", "persona": "Who they are and how this scenario affects them personally. Their emotional state.", "stance": "supportive|opposing|neutral|observer", "interests": ["topic1"]}}]}}"#
+    );
+
+    // Fire both in parallel
+    let (stakeholder_result, figurant_result) = tokio::join!(
+        llm.call_extraction(stakeholder_system, &stakeholder_user, 8192),
+        llm.call_extraction(figurant_system, &figurant_user, 8192),
+    );
+
+    // --- Process stakeholder results ---
+    let mut all_stakeholders: Vec<ExtractedStakeholder> = Vec::new();
+    match stakeholder_result {
         Ok(raw) => {
             if let Ok(parsed) = serde_json::from_str::<ExtractedStakeholders>(&raw) {
                 all_stakeholders.extend(parsed.stakeholders);
@@ -193,7 +223,7 @@ JSON format:
 
     tracing::info!("Extracted {} stakeholder personas", all_stakeholders.len());
 
-    // Step 2: Convert stakeholders to agent profiles
+    // Convert stakeholders to agent profiles
     let mut agents: Vec<AgentProfile> = Vec::new();
     for s in &all_stakeholders {
         let tier = match s.importance.to_lowercase().as_str() {
@@ -286,74 +316,51 @@ JSON format:
         });
     }
 
-    // Step 3: Generate additional figurant agents (general public)
-    let figurant_target = target_count.max(agents.len());
-    let existing_count = agents.len();
-    if figurant_target > existing_count {
-        let extra = figurant_target - existing_count;
-        tracing::info!("Generating {extra} additional figurant agents");
-
-        let system = r#"You generate realistic everyday social media users — regular people, NOT public figures.
-Each person must feel REAL: specific job, specific emotional reaction to the scenario.
-Give them realistic names and Twitter-style usernames.
-Respond with ONLY valid JSON."#;
-
-        let user = format!(
-            r#"Generate {extra} diverse everyday social media users who would tweet about this scenario:
-{scenario}
-
-These are REGULAR PEOPLE (not experts or public figures). Mix of:
-- People directly affected (lost access, disrupted workflow, financial impact)
-- People with strong opinions (angry, amused, scared, opportunistic)
-- Casual observers (confused, making jokes, sharing memes)
-- People in different countries, ages (18-70), professions
-
-Each person should have a SPECIFIC emotional reaction, not generic "interested observer".
-
-JSON format:
-{{"profiles": [{{"name": "Full Name", "username": "twitter_handle", "bio": "short Twitter bio", "persona": "Who they are and how this scenario affects them personally. Their emotional state.", "stance": "supportive|opposing|neutral|observer", "interests": ["topic1"]}}]}}"#
-        );
-
-        match llm.call_extraction(system, &user, 8192).await {
-            Ok(raw) => {
-                if let Ok(parsed) = parse_profile_response(&raw) {
-                    for p in parsed {
-                        let stance = match p.stance.to_lowercase().as_str() {
-                            "supportive" => Stance::Supportive,
-                            "opposing" => Stance::Opposing,
-                            "observer" => Stance::Observer,
-                            _ => Stance::Neutral,
-                        };
-                        let username = p.username.replace('@', "")
-                            .chars().filter(|c| c.is_alphanumeric() || *c == '_')
-                            .take(20).collect::<String>();
-                        agents.push(AgentProfile {
-                            id: Uuid::new_v4(),
-                            name: p.name,
-                            username,
-                            tier: Tier::Tier3,
-                            bio: p.bio,
-                            persona: p.persona,
-                            stance,
-                            sentiment_bias: match stance {
-                                Stance::Supportive => 0.3,
-                                Stance::Opposing => -0.3,
-                                _ => 0.0,
-                            },
-                            influence_weight: 1.0,
-                            activity_level: 0.4,
-                            active_hours: (8..23).collect(),
-                            interests: p.interests,
-                            age: None,
-                            profession: None,
-                            source_entity: None,
-                            archetype: assign_figurant_archetype(),
-                        });
-                    }
+    // --- Process figurant results ---
+    match figurant_result {
+        Ok(raw) => {
+            if let Ok(parsed) = parse_profile_response(&raw) {
+                for p in parsed {
+                    let stance = match p.stance.to_lowercase().as_str() {
+                        "supportive" => Stance::Supportive,
+                        "opposing" => Stance::Opposing,
+                        "observer" => Stance::Observer,
+                        _ => Stance::Neutral,
+                    };
+                    let username = p.username.replace('@', "")
+                        .chars().filter(|c| c.is_alphanumeric() || *c == '_')
+                        .take(20).collect::<String>();
+                    agents.push(AgentProfile {
+                        id: Uuid::new_v4(),
+                        name: p.name,
+                        username,
+                        tier: Tier::Tier3,
+                        bio: p.bio,
+                        persona: p.persona,
+                        stance,
+                        sentiment_bias: match stance {
+                            Stance::Supportive => 0.3,
+                            Stance::Opposing => -0.3,
+                            _ => 0.0,
+                        },
+                        influence_weight: 1.0,
+                        activity_level: 0.4,
+                        active_hours: (8..23).collect(),
+                        interests: p.interests,
+                        age: None,
+                        profession: None,
+                        source_entity: None,
+                        archetype: assign_figurant_archetype(),
+                    });
                 }
             }
-            Err(e) => tracing::warn!("Figurant generation failed: {e}"),
         }
+        Err(e) => tracing::warn!("Figurant generation failed: {e}"),
+    }
+
+    // Trim to target count if we over-generated
+    if agents.len() > target_count {
+        agents.truncate(target_count);
     }
 
     Ok(agents)

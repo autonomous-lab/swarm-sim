@@ -445,21 +445,31 @@ async fn cmd_run(
     tracing::info!("Generating report...");
     let report_path = {
         let sim_state = state.read().await;
-        let path = report::save_report(
+        match report::save_report(
             &llm,
             &sim_state,
             &config.output.output_dir,
             &config.output.report_file,
         )
-        .await?;
-        path
+        .await
+        {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("Report generation failed: {e}");
+                None
+            }
+        }
         // Read lock dropped here
     };
-    tracing::info!("Report saved: {report_path}");
+    if let Some(ref path) = report_path {
+        tracing::info!("Report saved: {path}");
+    }
 
     println!("\nSimulation complete.");
     println!("  Actions log: {}", config.output.output_dir.join(&config.output.action_log).display());
-    println!("  Report: {report_path}");
+    if let Some(ref path) = report_path {
+        println!("  Report: {path}");
+    }
 
     // Keep web server alive after simulation so users can explore results
     if config.server.enabled {

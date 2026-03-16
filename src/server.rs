@@ -526,29 +526,43 @@ async fn launch_simulation(
             .into_response();
     }
 
-    match launcher::launch_simulation(
-        req,
-        &state.base_config,
-        state.llm.clone(),
-        state.sim_state.clone(),
-        state.ws_tx.clone(),
-    )
-    .await
+    // Set status to Preparing immediately so the UI can show a loading state
     {
-        Ok(new_controls) => {
-            let mut controls = state.controls.write().await;
-            *controls = new_controls;
-            Json(serde_json::json!({"status": "launched"})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Launch failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Launch failed: {e}")})),
-            )
-                .into_response()
-        }
+        let mut s = state.sim_state.write().await;
+        s.status = SimStatus::Preparing;
     }
+
+    // Spawn agent generation + engine startup in background — return 202 immediately
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        match launcher::launch_simulation(
+            req,
+            &bg_state.base_config,
+            bg_state.llm.clone(),
+            bg_state.sim_state.clone(),
+            bg_state.ws_tx.clone(),
+        )
+        .await
+        {
+            Ok(new_controls) => {
+                let mut controls = bg_state.controls.write().await;
+                *controls = new_controls;
+                tracing::info!("Background launch completed successfully");
+            }
+            Err(e) => {
+                tracing::error!("Background launch failed: {e}");
+                // Reset status back to idle on failure
+                let mut s = bg_state.sim_state.write().await;
+                s.status = SimStatus::Idle;
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "preparing"})),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
