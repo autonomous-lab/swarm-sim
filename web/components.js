@@ -45,6 +45,73 @@ function renderPostCard(action) {
     </div>`;
 }
 
+function renderThread(root, replies) {
+  const likeCount = root.likes ? root.likes.length : 0;
+  const replyCount = replies.length;
+  const collapsed = replyCount > 3;
+  const visibleReplies = collapsed ? replies.slice(0, 2) : replies;
+  const hiddenCount = collapsed ? replyCount - 2 : 0;
+  const threadId = root.id.slice(0, 8);
+
+  let repliesHtml = visibleReplies.map(r => {
+    const time = r.simulated_time ? new Date(r.simulated_time).toLocaleTimeString() : '';
+    return `
+      <div class="thread-reply">
+        <div class="thread-reply-header">
+          <span class="post-author">@${esc(r.author_name)}</span>
+          <span class="post-time">R${r.created_at_round} ${time}</span>
+        </div>
+        <div class="thread-reply-content">${esc(r.content)}</div>
+      </div>`;
+  }).join('');
+
+  if (collapsed) {
+    repliesHtml += `
+      <button class="thread-toggle" onclick="expandThread(this, '${threadId}')">
+        Show ${hiddenCount} more ${hiddenCount === 1 ? 'reply' : 'replies'}
+      </button>`;
+    const hiddenReplies = replies.slice(2).map(r => {
+      const time = r.simulated_time ? new Date(r.simulated_time).toLocaleTimeString() : '';
+      return `
+        <div class="thread-reply thread-hidden" data-thread="${threadId}">
+          <div class="thread-reply-header">
+            <span class="post-author">@${esc(r.author_name)}</span>
+            <span class="post-time">R${r.created_at_round} ${time}</span>
+          </div>
+          <div class="thread-reply-content">${esc(r.content)}</div>
+        </div>`;
+    }).join('');
+    repliesHtml += hiddenReplies;
+  }
+
+  const time = root.simulated_time ? new Date(root.simulated_time).toLocaleTimeString() : '';
+
+  return `
+    <div class="thread-card">
+      <div class="post-card" style="margin-bottom:0;border-bottom-left-radius:0;border-bottom-right-radius:0">
+        <div class="post-header">
+          <span class="post-author">@${esc(root.author_name)}</span>
+          <span class="action-badge post">POST</span>
+          <span class="post-time">R${root.created_at_round} ${time}</span>
+        </div>
+        <div class="post-content">${esc(root.content)}</div>
+        <div class="thread-engagement">
+          <span class="thread-stat">${likeCount} like${likeCount !== 1 ? 's' : ''}</span>
+          <span class="thread-stat">${replyCount} repl${replyCount !== 1 ? 'ies' : 'y'}</span>
+        </div>
+      </div>
+      <div class="thread-replies">
+        ${repliesHtml}
+      </div>
+    </div>`;
+}
+
+function expandThread(btn, threadId) {
+  const hidden = btn.parentElement.querySelectorAll(`.thread-hidden[data-thread="${threadId}"]`);
+  hidden.forEach(el => el.classList.remove('thread-hidden'));
+  btn.remove();
+}
+
 function renderRoundSeparator(round, summary) {
   const stats = summary
     ? `${summary.active_agents} active | ${summary.new_posts}p ${summary.new_replies}r ${summary.new_likes}l`

@@ -346,12 +346,13 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   event.target.classList.add('active');
 
-  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content' };
+  const contentMap = { feed: 'feed-list', trending: 'trending-list', timeline: 'timeline-list', dashboard: 'dashboard-content', threads: 'threads-list' };
   document.getElementById(contentMap[tab]).classList.add('active');
 
   if (tab === 'trending') refreshTrending();
   if (tab === 'timeline') refreshTimeline();
   if (tab === 'dashboard') refreshDashboard();
+  if (tab === 'threads') refreshThreads();
 }
 
 async function refreshTrending() {
@@ -383,6 +384,48 @@ async function refreshDashboard() {
   } catch (e) {
     document.getElementById('dashboard-content').innerHTML =
       '<div style="color:var(--text-muted);padding:20px;text-align:center">Dashboard unavailable</div>';
+  }
+}
+
+async function refreshThreads() {
+  const el = document.getElementById('threads-list');
+  try {
+    const data = await fetchJson('/api/posts?limit=1000');
+    const posts = data.posts || [];
+
+    if (posts.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">No posts yet</div>';
+      return;
+    }
+
+    // Index all posts by ID
+    const postMap = {};
+    posts.forEach(p => { postMap[p.id] = p; });
+
+    // Find root posts (no reply_to) that have at least 1 reply
+    const threads = posts
+      .filter(p => !p.reply_to && p.replies && p.replies.length > 0)
+      .map(root => {
+        const replies = root.replies
+          .map(rid => postMap[rid])
+          .filter(Boolean)
+          .sort((a, b) => a.created_at_round - b.created_at_round);
+        const lastActivity = replies.length > 0
+          ? Math.max(root.created_at_round, ...replies.map(r => r.created_at_round))
+          : root.created_at_round;
+        const engagement = (root.likes ? root.likes.length : 0) + (root.replies ? root.replies.length : 0) * 2;
+        return { root, replies, lastActivity, engagement };
+      })
+      .sort((a, b) => b.engagement - a.engagement || b.lastActivity - a.lastActivity);
+
+    if (threads.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">No threads with replies yet</div>';
+      return;
+    }
+
+    el.innerHTML = threads.map(t => renderThread(t.root, t.replies)).join('');
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">Could not load threads</div>';
   }
 }
 
