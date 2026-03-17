@@ -498,88 +498,57 @@ impl SimulationEngine {
             });
         }
 
-        // 4. Execute tiers sequentially, batches concurrently within each tier
-        let mut all_actions: Vec<Action> = Vec::new();
-        let mut prior_action_descriptions: Vec<String> = Vec::new();
-
-        // Get event descriptions for this round
+        // 4. Execute tiers SEQUENTIALLY to preserve causal chains (T1 → T2 → T3)
         let event_descriptions = self.get_event_descriptions_for_round().await;
+        let mut all_actions: Vec<Action> = Vec::new();
 
-        // === TIER 1 ===
-        if !active_tier1.is_empty() {
-            let actions = self
-                .execute_tier(
-                    Tier::Tier1,
-                    &active_tier1,
-                    &prior_action_descriptions,
-                    &event_descriptions,
-                    config,
-                    round,
-                )
-                .await;
-            for action in &actions {
-                prior_action_descriptions
-                    .push(format!("@{}: {}", action.agent_name, describe_action(action)));
-                if verbose {
-                    output::print_action(action, true);
-                }
-                logger.log_action(action)?;
-                let _ = self
-                    .ws_tx
-                    .send(WsEvent::Action { data: action.clone() });
-            }
-            all_actions.extend(actions);
+        // Tier 1 — VIPs set the narrative
+        let t1_actions = if !active_tier1.is_empty() {
+            self.execute_tier(Tier::Tier1, &active_tier1, &[], &event_descriptions, config, round).await
+        } else {
+            Vec::new()
+        };
+        for action in &t1_actions {
+            if verbose { output::print_action(action, true); }
+            logger.log_action(action)?;
+            let _ = self.ws_tx.send(WsEvent::Action { data: action.clone() });
         }
+        let t1_prior: Vec<String> = t1_actions.iter()
+            .filter(|a| !matches!(a.action_type, ActionType::DoNothing | ActionType::PinMemory))
+            .map(|a| describe_action_for_context(a))
+            .collect();
+        all_actions.extend(t1_actions);
 
-        // === TIER 2 ===
-        if !active_tier2.is_empty() {
-            let actions = self
-                .execute_tier(
-                    Tier::Tier2,
-                    &active_tier2,
-                    &prior_action_descriptions,
-                    &event_descriptions,
-                    config,
-                    round,
-                )
-                .await;
-            for action in &actions {
-                prior_action_descriptions
-                    .push(format!("@{}: {}", action.agent_name, describe_action(action)));
-                if verbose {
-                    output::print_action(action, true);
-                }
-                logger.log_action(action)?;
-                let _ = self
-                    .ws_tx
-                    .send(WsEvent::Action { data: action.clone() });
-            }
-            all_actions.extend(actions);
+        // Tier 2 — Standard agents react to VIPs
+        let t2_actions = if !active_tier2.is_empty() {
+            self.execute_tier(Tier::Tier2, &active_tier2, &t1_prior, &event_descriptions, config, round).await
+        } else {
+            Vec::new()
+        };
+        for action in &t2_actions {
+            if verbose { output::print_action(action, true); }
+            logger.log_action(action)?;
+            let _ = self.ws_tx.send(WsEvent::Action { data: action.clone() });
         }
+        let mut t12_prior = t1_prior;
+        t12_prior.extend(t2_actions.iter()
+            .filter(|a| !matches!(a.action_type, ActionType::DoNothing | ActionType::PinMemory))
+            .take(10)
+            .map(|a| describe_action_for_context(a)));
+        all_actions.extend(t2_actions);
 
-        // === TIER 3 ===
-        if !active_tier3.is_empty() {
-            let actions = self
-                .execute_tier(
-                    Tier::Tier3,
-                    &active_tier3,
-                    &prior_action_descriptions,
-                    &event_descriptions,
-                    config,
-                    round,
-                )
-                .await;
-            for action in &actions {
-                if verbose {
-                    output::print_action(action, true);
-                }
-                logger.log_action(action)?;
-                let _ = self
-                    .ws_tx
-                    .send(WsEvent::Action { data: action.clone() });
-            }
-            all_actions.extend(actions);
+        // Tier 3 — Figurants react to everyone
+        let t3_actions = if !active_tier3.is_empty() {
+            self.execute_tier(Tier::Tier3, &active_tier3, &t12_prior, &event_descriptions, config, round).await
+        } else {
+            Vec::new()
+        };
+        for action in &t3_actions {
+            if verbose { output::print_action(action, true); }
+            logger.log_action(action)?;
+            let _ = self.ws_tx.send(WsEvent::Action { data: action.clone() });
         }
+        all_actions.extend(t3_actions);
 
         // 5. Update sentiment drift
         update_sentiments(&self.state, round).await;
@@ -872,7 +841,15 @@ async fn execute_batch(
         );
         let feed_summaries: Vec<PostSummary> = feed
             .iter()
-            .map(|p| PostSummary::from_post(p, round, 120))
+            .map(|p| {
+                let mut summary = PostSummary::from_post(p, round, 120);
+                if let Some(parent_id) = p.reply_to {
+                    if let Some(parent) = s.world.posts.get(&parent_id) {
+                        summary.reply_to_author = Some(parent.author_name.clone());
+                    }
+                }
+                summary
+            })
             .collect();
 
         let trending = s.world.trending(world_config.trending_count, 10);
@@ -881,9 +858,20 @@ async fn execute_batch(
             .map(|p| PostSummary::from_post(p, round, 80))
             .collect();
 
-        // Build reply candidates
+        // Build reply candidates (increased to 6 to include thread candidates)
         let runtime_stance = Stance::from_sentiment(current_sentiment);
-        let reply_candidates = s.world.build_reply_candidates(&agent_id, &runtime_stance, 4);
+        let reply_candidates = s.world.build_reply_candidates(&agent_id, &runtime_stance, 6);
+
+        // Collect agent's own recent posts to prevent repetition
+        let own_recent_posts: Vec<String> = agent_state
+            .map(|st| {
+                st.post_ids.iter().rev().take(5).filter_map(|pid| {
+                    s.world.posts.get(pid).map(|p| {
+                        p.content.chars().take(120).collect::<String>()
+                    })
+                }).collect()
+            })
+            .unwrap_or_default();
 
         let system = llm::build_single_system_prompt(&profile, current_sentiment, challenge_question.as_deref());
         let user = llm::build_single_user_prompt(
@@ -896,14 +884,26 @@ async fn execute_batch(
             &reply_candidates,
             events,
             challenge_question.as_deref(),
+            &own_recent_posts,
         );
+
+        // Build ID resolution maps before releasing lock
+        let post_id_map: HashMap<String, Uuid> = s.world.posts.keys()
+            .map(|id| (id.to_string()[..8].to_string(), *id))
+            .collect();
+        let agent_id_map: HashMap<String, Uuid> = s.agents.keys()
+            .map(|id| (id.to_string()[..8].to_string(), *id))
+            .collect();
+        let username_map: HashMap<String, Uuid> = s.agents.values()
+            .map(|p| (p.username.to_lowercase(), p.id))
+            .collect();
 
         drop(s); // Release read lock before LLM call
 
         match llm.call_tier(tier, &system, &user).await {
             Ok(raw) => {
                 if let Some(parsed) = llm::parse_single_response(&raw) {
-                    convert_single_actions(agent_id, &profile, &parsed, round, events)
+                    convert_single_actions(agent_id, &profile, &parsed, round, events, &post_id_map, &agent_id_map, &username_map)
                 } else {
                     tracing::warn!("Failed to parse response for @{}", profile.username);
                     Vec::new()
@@ -927,7 +927,7 @@ async fn execute_batch(
             _ => 10,
         };
 
-        let agents_with_memory: Vec<(AgentProfile, String, f32)> = agent_ids
+        let agents_with_memory: Vec<(AgentProfile, String, f32, Vec<String>)> = agent_ids
             .iter()
             .filter_map(|id| {
                 let profile = s.agents.get(id)?.clone();
@@ -938,7 +938,17 @@ async fn execute_batch(
                 let sentiment = agent_state
                     .map(|st| st.current_sentiment)
                     .unwrap_or(profile.sentiment_bias);
-                Some((profile, memory, sentiment))
+                // Collect agent's own recent posts to prevent repetition
+                let own_posts: Vec<String> = agent_state
+                    .map(|st| {
+                        st.post_ids.iter().rev().take(3).filter_map(|pid| {
+                            s.world.posts.get(pid).map(|p| {
+                                p.content.chars().take(80).collect::<String>()
+                            })
+                        }).collect()
+                    })
+                    .unwrap_or_default();
+                Some((profile, memory, sentiment, own_posts))
             })
             .collect();
 
@@ -954,7 +964,15 @@ async fn execute_batch(
         let feed_summaries: Vec<PostSummary> = feed
             .iter()
             .take(10)
-            .map(|p| PostSummary::from_post(p, round, 80))
+            .map(|p| {
+                let mut summary = PostSummary::from_post(p, round, 80);
+                if let Some(parent_id) = p.reply_to {
+                    if let Some(parent) = s.world.posts.get(&parent_id) {
+                        summary.reply_to_author = Some(parent.author_name.clone());
+                    }
+                }
+                summary
+            })
             .collect();
 
         let trending = s.world.trending(5, 10);
@@ -978,7 +996,18 @@ async fn execute_batch(
         // Clone profiles for post-parse use
         let profiles: HashMap<String, (Uuid, AgentProfile)> = agents_with_memory
             .iter()
-            .map(|(p, _, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
+            .map(|(p, _, _, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
+            .collect();
+
+        // Build ID resolution maps before releasing lock
+        let post_id_map: HashMap<String, Uuid> = s.world.posts.keys()
+            .map(|id| (id.to_string()[..8].to_string(), *id))
+            .collect();
+        let agent_id_map: HashMap<String, Uuid> = s.agents.keys()
+            .map(|id| (id.to_string()[..8].to_string(), *id))
+            .collect();
+        let username_map: HashMap<String, Uuid> = s.agents.values()
+            .map(|p| (p.username.to_lowercase(), p.id))
             .collect();
 
         drop(s);
@@ -986,7 +1015,7 @@ async fn execute_batch(
         match llm.call_tier(tier, &system, &user).await {
             Ok(raw) => {
                 if let Some(parsed) = llm::parse_batch_response(&raw) {
-                    convert_batch_actions(&profiles, &parsed, round)
+                    convert_batch_actions(&profiles, &parsed, round, &post_id_map, &agent_id_map, &username_map)
                 } else {
                     tracing::warn!("Failed to parse batch response for {} agents", agent_ids.len());
                     Vec::new()
@@ -1010,6 +1039,9 @@ fn convert_single_actions(
     parsed: &llm::SingleAgentResponse,
     round: u32,
     _events: &[String],
+    post_id_map: &HashMap<String, Uuid>,
+    agent_id_map: &HashMap<String, Uuid>,
+    username_map: &HashMap<String, Uuid>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -1037,16 +1069,16 @@ fn convert_single_actions(
             action_type,
             content: pa.content.clone(),
             target_post_id: pa.target_post_id.as_ref().and_then(|s| {
-                Uuid::parse_str(s).map_err(|e| {
-                    tracing::debug!("Invalid target_post_id '{}' from @{}: {e}", s, profile.username);
-                    e
-                }).ok()
+                resolve_id(s, post_id_map).or_else(|| {
+                    tracing::debug!("Unresolved target_post_id '{}' from @{}", s, profile.username);
+                    None
+                })
             }),
             target_agent_id: pa.target_agent_id.as_ref().and_then(|s| {
-                Uuid::parse_str(s).map_err(|e| {
-                    tracing::debug!("Invalid target_agent_id '{}' from @{}: {e}", s, profile.username);
-                    e
-                }).ok()
+                resolve_agent_id(s, agent_id_map, username_map).or_else(|| {
+                    tracing::debug!("Unresolved target_agent_id '{}' from @{}", s, profile.username);
+                    None
+                })
             }),
             reasoning: parsed.reasoning.clone(),
         });
@@ -1076,6 +1108,9 @@ fn convert_batch_actions(
     profiles: &HashMap<String, (Uuid, AgentProfile)>,
     parsed: &llm::BatchAgentResponse,
     round: u32,
+    post_id_map: &HashMap<String, Uuid>,
+    agent_id_map: &HashMap<String, Uuid>,
+    username_map: &HashMap<String, Uuid>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -1108,16 +1143,16 @@ fn convert_batch_actions(
                 action_type,
                 content: pa.content.clone(),
                 target_post_id: pa.target_post_id.as_ref().and_then(|s| {
-                    Uuid::parse_str(s).map_err(|e| {
-                        tracing::debug!("Invalid target_post_id '{}' from batch @{}: {e}", s, profile.username);
-                        e
-                    }).ok()
+                    resolve_id(s, post_id_map).or_else(|| {
+                        tracing::debug!("Unresolved target_post_id '{}' from batch @{}", s, profile.username);
+                        None
+                    })
                 }),
                 target_agent_id: pa.target_agent_id.as_ref().and_then(|s| {
-                    Uuid::parse_str(s).map_err(|e| {
-                        tracing::debug!("Invalid target_agent_id '{}' from batch @{}: {e}", s, profile.username);
-                        e
-                    }).ok()
+                    resolve_agent_id(s, agent_id_map, username_map).or_else(|| {
+                        tracing::debug!("Unresolved target_agent_id '{}' from batch @{}", s, profile.username);
+                        None
+                    })
                 }),
                 reasoning: entry.reasoning.clone(),
             });
@@ -1478,6 +1513,34 @@ fn describe_action(action: &Action) -> String {
             format!("proposed solution: \"{preview}\"")
         }
     }
+}
+
+fn describe_action_for_context(action: &Action) -> String {
+    format!("@{} {}", action.agent_name, describe_action(action))
+}
+
+/// Resolve a post ID from LLM response — tries full UUID, then short ID (first 8 chars).
+fn resolve_id(s: &str, id_map: &HashMap<String, Uuid>) -> Option<Uuid> {
+    let s = s.trim();
+    if let Ok(uuid) = Uuid::parse_str(s) {
+        return Some(uuid);
+    }
+    let short = if s.len() >= 8 { &s[..8] } else { s };
+    id_map.get(short).copied()
+}
+
+/// Resolve an agent ID — tries UUID, short ID, then @username.
+fn resolve_agent_id(s: &str, agent_id_map: &HashMap<String, Uuid>, username_map: &HashMap<String, Uuid>) -> Option<Uuid> {
+    let s = s.trim();
+    if let Ok(uuid) = Uuid::parse_str(s) {
+        return Some(uuid);
+    }
+    let short = if s.len() >= 8 { &s[..8] } else { s };
+    if let Some(id) = agent_id_map.get(short) {
+        return Some(*id);
+    }
+    let username = s.trim_start_matches('@').to_lowercase();
+    username_map.get(&username).copied()
 }
 
 /// Rich action description with context for agent memory.

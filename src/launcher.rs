@@ -98,8 +98,13 @@ pub async fn launch_simulation(
         s.status = SimStatus::Preparing;
         s.agents = agents_map;
         s.agent_states = agent_states_map;
-        s.world = WorldState::new(chrono::Utc::now());
+        // Start simulated time at 9:00 AM today so agents have full active_hours runway
+        let today = chrono::Utc::now().date_naive();
+        let start_time = today.and_hms_opt(9, 0, 0).unwrap().and_utc();
+        s.world = WorldState::new(start_time);
         s.config = config.clone();
+        // Use 30 min/round for web-launched sims (more rounds before agents "sleep")
+        s.config.simulation.minutes_per_round = 30;
         s.total_actions = 0;
         s.syntheses = Vec::new();
         s.prompt_tokens = 0;

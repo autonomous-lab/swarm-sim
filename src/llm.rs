@@ -460,9 +460,10 @@ HARD LIMIT: {max_len} characters per post. Posts exceeding this are INVALID.
 RULES:
 - Write like this person would ACTUALLY tweet. No corporate speak. No essay structure.
 - You are LIVING through this event right now. React emotionally, not like a commentator analyzing from outside.
-- NEVER repeat phrases you see in the feed or that you said before. Make a NEW unique point each round.
+- NEVER repeat phrases you see in the feed or in YOUR RECENT POSTS (shown below). Make a COMPLETELY NEW point each round.
 - Prefer replying to posts in your feed over creating new posts.
-- Use exact post UUIDs when replying/liking/reposting.
+- You can reply to original posts OR to other users' replies — threaded conversations are natural. Replying to a reply creates deeper discussion.
+- Use exact post IDs shown in [brackets] when replying/liking/reposting.
 - You may take 0-3 actions.
 - NO hashtags (unless you are an activist, then max 1). Real people rarely use hashtags.
 - Use contractions (don't, can't, it's). Use lowercase when casual. Real tweets are messy.
@@ -506,12 +507,20 @@ pub fn build_single_user_prompt(
     reply_candidates: &[ReplyCandidate],
     events: &[String],
     challenge_question: Option<&str>,
+    own_recent_posts: &[String],
 ) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
         "ROUND {round}/{total_rounds} | Time: {simulated_time}"
     ));
+
+    if !own_recent_posts.is_empty() {
+        parts.push("\nYOUR RECENT POSTS (DO NOT repeat these — make a completely new point):".into());
+        for post in own_recent_posts {
+            parts.push(format!("  - \"{post}\""));
+        }
+    }
 
     if !memory_text.is_empty() {
         parts.push(format!("\nYOUR MEMORY:\n{memory_text}"));
@@ -520,10 +529,16 @@ pub fn build_single_user_prompt(
     if !feed_posts.is_empty() {
         parts.push("\nYOUR FEED:".into());
         for p in feed_posts {
+            let thread_prefix = if let Some(ref parent) = p.reply_to_author {
+                format!(" [replying to @{}]", parent)
+            } else {
+                String::new()
+            };
             parts.push(format!(
-                "  [{id}] @{author}: {content}\n    Likes:{likes} Replies:{replies} | {age}r ago",
-                id = p.post_id,
+                "  [{id}] @{author}{thread}: {content}\n    Likes:{likes} Replies:{replies} | {age}r ago",
+                id = p.short_id,
                 author = p.author,
+                thread = thread_prefix,
                 content = p.content_preview,
                 likes = p.likes,
                 replies = p.replies,
@@ -537,14 +552,14 @@ pub fn build_single_user_prompt(
         for rc in reply_candidates {
             parts.push(format!(
                 "  [{id}] @{author}: \"{content}\" ({eng:.0} engagement)\n    → {reason}",
-                id = rc.post_id,
+                id = &rc.post_id.to_string()[..8],
                 author = rc.author_name,
                 content = rc.content_preview,
                 eng = rc.engagement,
                 reason = rc.reason,
             ));
         }
-        parts.push("IMPORTANT: When replying, use the exact post UUID as target_post_id. Don't just create new posts — react to what's happening.".into());
+        parts.push("IMPORTANT: When replying, use the exact post ID (from [brackets]) as target_post_id. Don't just create new posts — react to what's happening.".into());
     }
 
     if !trending_posts.is_empty() {
@@ -553,7 +568,7 @@ pub fn build_single_user_prompt(
             parts.push(format!(
                 "  #{} [{id}] @{author}: {content} (engagement:{eng:.0})",
                 i + 1,
-                id = p.post_id,
+                id = p.short_id,
                 author = p.author,
                 content = p.content_preview,
                 eng = p.engagement,
@@ -569,7 +584,7 @@ pub fn build_single_user_prompt(
     }
 
     if let Some(q) = challenge_question {
-        parts.push(format!("\nCHALLENGE QUESTION (you may use propose_solution if you have a concrete idea):\n{q}"));
+        parts.push(format!("\nCHALLENGE QUESTION:\n{q}\nYou can propose_solution with a concrete idea, OR like/reply to existing solutions in the feed. Don't just propose — engage with others' ideas too."));
     }
 
     parts.join("\n")
@@ -577,12 +592,12 @@ pub fn build_single_user_prompt(
 
 /// Build the system prompt for a batch of agents (Tier 2/3).
 pub fn build_batch_system_prompt(
-    agents: &[(AgentProfile, String, f32)],
+    agents: &[(AgentProfile, String, f32, Vec<String>)],
     persona_max_chars: usize,
     challenge_question: Option<&str>,
 ) -> String {
     let mut agent_descs = String::new();
-    for (agent, memory_short, sentiment) in agents {
+    for (agent, memory_short, sentiment, own_posts) in agents {
         let (_behavior, _action_mix, style) = agent.archetype.prompt_instructions();
         let runtime_stance = Stance::from_sentiment(*sentiment);
         agent_descs.push_str(&format!(
@@ -594,6 +609,13 @@ pub fn build_batch_system_prompt(
             archetype = agent.archetype,
             memory = memory_short,
         ));
+        if !own_posts.is_empty() {
+            agent_descs.push_str("Already posted (DON'T repeat): ");
+            for p in own_posts.iter().take(3) {
+                agent_descs.push_str(&format!("\"{}\" | ", p));
+            }
+            agent_descs.push('\n');
+        }
     }
 
     format!(
@@ -616,7 +638,8 @@ HASHTAG RULE: Almost NO ONE should use hashtags. Only activists may use MAX 1 pe
 LANGUAGE RULE: Use contractions (don't, can't, it's, they're). Use lowercase when casual. Real tweets are messy and imperfect.
 
 Most users should like/repost/reply — NOT everyone needs to create_post.
-Use exact post UUIDs for reply/like/repost.
+Replies can be to original posts OR to other users' replies (threaded conversations). Replying to a reply is natural and encouraged.
+Use exact post IDs shown in [brackets] for reply/like/repost.
 
 USERS:
 {agent_descs}
@@ -670,12 +693,18 @@ pub fn build_batch_user_prompt(
     ));
 
     if !feed_posts.is_empty() {
-        parts.push("\nSHARED FEED (top posts):".into());
+        parts.push("\nSHARED FEED (top posts — you can reply to any of these, including replies):".into());
         for p in feed_posts.iter().take(10) {
+            let thread_prefix = if let Some(ref parent) = p.reply_to_author {
+                format!(" [replying to @{}]", parent)
+            } else {
+                String::new()
+            };
             parts.push(format!(
-                "  [{id}] @{author}: {content} (L:{likes} R:{replies})",
-                id = p.post_id,
+                "  [{id}] @{author}{thread}: {content} (L:{likes} R:{replies})",
+                id = p.short_id,
                 author = p.author,
+                thread = thread_prefix,
                 content = p.content_preview,
                 likes = p.likes,
                 replies = p.replies,
@@ -694,11 +723,12 @@ pub fn build_batch_user_prompt(
         parts.push("\nTRENDING:".into());
         for (i, p) in trending_posts.iter().take(5).enumerate() {
             parts.push(format!(
-                "  #{} @{}: {} (eng:{:.0})",
+                "  #{} [{id}] @{}: {} (eng:{:.0})",
                 i + 1,
                 p.author,
                 p.content_preview,
                 p.engagement,
+                id = p.short_id,
             ));
         }
     }
@@ -711,7 +741,7 @@ pub fn build_batch_user_prompt(
     }
 
     if let Some(q) = challenge_question {
-        parts.push(format!("\nCHALLENGE QUESTION (agents may use propose_solution if they have a concrete idea):\n{q}"));
+        parts.push(format!("\nCHALLENGE QUESTION:\n{q}\nAgents can propose_solution OR like/reply to existing solutions. Prefer engaging with others' ideas over creating new posts."));
     }
 
     parts.join("\n")
@@ -731,6 +761,7 @@ pub struct PostSummary {
     pub replies: usize,
     pub rounds_ago: u32,
     pub engagement: f64,
+    pub reply_to_author: Option<String>,
 }
 
 impl PostSummary {
@@ -749,6 +780,7 @@ impl PostSummary {
             replies: post.replies.len(),
             rounds_ago: current_round.saturating_sub(post.created_at_round),
             engagement: post.engagement_score(),
+            reply_to_author: None,
         }
     }
 }

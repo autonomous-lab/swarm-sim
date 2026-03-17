@@ -283,12 +283,12 @@ impl WorldState {
             .cloned()
             .unwrap_or_default();
 
+        // Include both top-level posts AND replies (enables threaded conversations)
         let recent_posts: Vec<&Post> = self
             .posts
             .values()
             .filter(|p| {
                 p.author_id != *agent_id
-                    && p.reply_to.is_none()
                     && self.current_round.saturating_sub(p.created_at_round) <= 3
             })
             .collect();
@@ -297,6 +297,28 @@ impl WorldState {
 
         for post in &recent_posts {
             let content_lower = post.content.to_lowercase();
+            let is_thread_reply = post.reply_to.is_some();
+
+            // Build preview with thread context for replies
+            let content_preview = if is_thread_reply {
+                if let Some(parent_id) = post.reply_to {
+                    if let Some(parent) = self.posts.get(&parent_id) {
+                        let parent_preview: String = parent.content.chars().take(50).collect();
+                        format!(
+                            "[re: @{} \"{}\"] {}",
+                            parent.author_name,
+                            parent_preview,
+                            post.content.chars().take(80).collect::<String>()
+                        )
+                    } else {
+                        post.content.chars().take(100).collect()
+                    }
+                } else {
+                    post.content.chars().take(100).collect()
+                }
+            } else {
+                post.content.chars().take(100).collect()
+            };
 
             // Check stance opposition using keyword heuristics
             let is_opposing = match agent_stance {
@@ -318,20 +340,30 @@ impl WorldState {
             let is_viral = post.engagement_score() > 5.0;
             let is_followed = following.contains(&post.author_id);
             let has_few_replies = post.replies.len() < 3;
+            let is_active_thread = is_thread_reply
+                && (post.engagement_score() > 1.0 || !post.replies.is_empty());
 
             if is_opposing {
                 candidates.push(ReplyCandidate {
                     post_id: post.id,
                     author_name: post.author_name.clone(),
-                    content_preview: post.content.chars().take(100).collect(),
+                    content_preview: content_preview.clone(),
                     engagement: post.engagement_score(),
                     reason: "DISAGREES with your stance. Push back or engage.".into(),
+                });
+            } else if is_active_thread {
+                candidates.push(ReplyCandidate {
+                    post_id: post.id,
+                    author_name: post.author_name.clone(),
+                    content_preview: content_preview.clone(),
+                    engagement: post.engagement_score(),
+                    reason: "ACTIVE THREAD. Jump into this conversation with your take.".into(),
                 });
             } else if is_viral {
                 candidates.push(ReplyCandidate {
                     post_id: post.id,
                     author_name: post.author_name.clone(),
-                    content_preview: post.content.chars().take(100).collect(),
+                    content_preview: content_preview.clone(),
                     engagement: post.engagement_score(),
                     reason: "VIRAL post. Engaging increases your visibility.".into(),
                 });
@@ -339,21 +371,23 @@ impl WorldState {
                 candidates.push(ReplyCandidate {
                     post_id: post.id,
                     author_name: post.author_name.clone(),
-                    content_preview: post.content.chars().take(100).collect(),
+                    content_preview: content_preview.clone(),
                     engagement: post.engagement_score(),
                     reason: "From someone you follow. Join the conversation.".into(),
                 });
             }
         }
 
-        // Sort: opposing first, then viral, then followed
+        // Sort: opposing first, then active threads, then viral, then followed
         candidates.sort_by(|a, b| {
             let a_priority = if a.reason.contains("DISAGREES") { 0 }
-                else if a.reason.contains("VIRAL") { 1 }
-                else { 2 };
+                else if a.reason.contains("ACTIVE THREAD") { 1 }
+                else if a.reason.contains("VIRAL") { 2 }
+                else { 3 };
             let b_priority = if b.reason.contains("DISAGREES") { 0 }
-                else if b.reason.contains("VIRAL") { 1 }
-                else { 2 };
+                else if b.reason.contains("ACTIVE THREAD") { 1 }
+                else if b.reason.contains("VIRAL") { 2 }
+                else { 3 };
             a_priority.cmp(&b_priority)
                 .then(b.engagement.partial_cmp(&a.engagement).unwrap_or(std::cmp::Ordering::Equal))
         });

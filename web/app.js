@@ -466,7 +466,8 @@ async function refreshGraph() {
     const data = await fetchJson('/api/graph');
     renderNetworkGraph(data, container);
   } catch (e) {
-    container.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center">No graph data available yet. Launch a simulation first.</div>';
+    console.error('Graph render error:', e);
+    container.innerHTML = `<div style="color:var(--text-muted);padding:40px;text-align:center">Graph error: ${e.message || 'Unknown error'}. Check console.</div>`;
   }
 }
 
@@ -562,6 +563,7 @@ async function launchSim() {
       feedActions = [];
       roundSummaries = [];
       syntheses = [];
+      _graphState = null; // Force full graph redraw on next render
       stats = { posts: 0, likes: 0, replies: 0, reposts: 0, actions: 0 };
       tokenUsage = { prompt: 0, completion: 0 };
       updateStats();
@@ -572,6 +574,14 @@ async function launchSim() {
       currentStatus = 'preparing';
       updateStatusBadge('preparing');
       updateNewSimButton();
+
+      // Show loading indicator in the feed
+      document.getElementById('feed-list').innerHTML = `
+        <div class="preparing-indicator">
+          <div class="preparing-spinner"></div>
+          <div class="preparing-text">Generating agent personas...</div>
+          <div class="preparing-subtext">Analyzing scenario, extracting stakeholders, building social graph</div>
+        </div>`;
 
       // Show challenge banner if set
       const challengeBanner = document.getElementById('challenge-banner');
@@ -587,8 +597,8 @@ async function launchSim() {
       statusEl.className = 'launch-status success';
       setTimeout(closeLaunchModal, 800);
 
-      // Refresh agents after short delay
-      setTimeout(loadAgents, 2000);
+      // Poll status until preparing phase ends
+      startPreparingPoll();
     } else {
       statusEl.textContent = data.error || 'Launch failed';
       statusEl.className = 'launch-status error';
@@ -665,6 +675,37 @@ function updateContinueVisibility() {
 }
 
 // ----------------------------------------------------------------
+// Preparing phase poll
+// ----------------------------------------------------------------
+
+let _preparingPollTimer = null;
+
+function startPreparingPoll() {
+  if (_preparingPollTimer) clearInterval(_preparingPollTimer);
+  _preparingPollTimer = setInterval(async () => {
+    try {
+      const status = await fetchJson('/api/status');
+      if (status.status !== 'preparing') {
+        clearInterval(_preparingPollTimer);
+        _preparingPollTimer = null;
+        updateStatus(status);
+        loadAgents();
+        // Clear the preparing indicator
+        if (currentTab === 'feed') {
+          const el = document.getElementById('feed-list');
+          if (el.querySelector('.preparing-indicator')) el.innerHTML = '';
+        }
+      } else if (status.total_agents > 0) {
+        // Update agent count even during preparing
+        document.getElementById('agent-count').textContent = `${status.total_agents} agents`;
+        const prepText = document.querySelector('.preparing-text');
+        if (prepText) prepText.textContent = `${status.total_agents} agents ready, starting simulation...`;
+      }
+    } catch (e) {}
+  }, 2000);
+}
+
+// ----------------------------------------------------------------
 // Polling (fallback + initial load)
 // ----------------------------------------------------------------
 
@@ -687,6 +728,52 @@ async function initialLoad() {
         showSynthesis(latest.round, latest.text);
       }
     } catch (e) {}
+
+    // Load existing data (survives page reload)
+    if (status.status !== 'idle') {
+      // Build agent tier lookup from agents list
+      let agentTiers = {};
+      try {
+        const agents = await fetchJson('/api/agents');
+        agents.forEach(a => { agentTiers[a.username] = a.tier; });
+      } catch (e) {}
+
+      // Load posts into feed
+      try {
+        const postsData = await fetchJson('/api/posts?limit=500');
+        const posts = postsData.posts || [];
+        if (posts.length > 0) {
+          feedActions = posts
+            .sort((a, b) => b.created_at_round - a.created_at_round)
+            .map(p => ({
+              id: p.id,
+              round: p.created_at_round,
+              agent_name: p.author_name,
+              agent_tier: agentTiers[p.author_name] || 'tier3',
+              action_type: p.reply_to ? 'reply' : (p.repost_of ? 'repost' : 'create_post'),
+              content: p.content,
+              simulated_time: p.simulated_time,
+              target_post_id: p.reply_to || p.repost_of || null,
+            }));
+          stats.posts = posts.filter(p => !p.reply_to && !p.repost_of).length;
+          stats.replies = posts.filter(p => p.reply_to).length;
+          stats.reposts = posts.filter(p => p.repost_of).length;
+          stats.actions = posts.length;
+          updateStats();
+          const feedEl = document.getElementById('feed-list');
+          feedEl.innerHTML = feedActions.map(renderPostCard).join('');
+        }
+      } catch (e) {}
+
+      // Load timeline (round summaries)
+      try {
+        const timeline = await fetchJson('/api/timeline');
+        if (timeline && timeline.length > 0) {
+          roundSummaries = timeline;
+          if (currentTab === 'timeline') refreshTimeline();
+        }
+      } catch (e) {}
+    }
   } catch (e) {
     console.log('Server not ready yet, retrying...');
     setTimeout(initialLoad, 2000);

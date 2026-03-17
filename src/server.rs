@@ -280,6 +280,11 @@ struct GraphNode {
     label: String,
     tier: String,
     size: f32,
+    post_count: usize,
+    follower_count: usize,
+    following_count: usize,
+    stance: String,
+    sentiment: f32,
 }
 
 #[derive(Serialize)]
@@ -294,15 +299,26 @@ async fn get_graph(State(state): State<AppState>) -> impl IntoResponse {
     let nodes: Vec<GraphNode> = s
         .agents
         .values()
-        .map(|a| GraphNode {
-            id: a.id.to_string(),
-            label: format!("@{}", a.username),
-            tier: a.tier.to_string(),
-            size: match a.tier {
-                Tier::Tier1 => 20.0,
-                Tier::Tier2 => 12.0,
-                Tier::Tier3 => 6.0,
-            },
+        .map(|a| {
+            let agent_state = s.agent_states.get(&a.id);
+            let post_count = agent_state.map(|st| st.post_ids.len()).unwrap_or(0);
+            let follower_count = agent_state.map(|st| st.followers.len()).unwrap_or(0);
+            let following_count = agent_state.map(|st| st.following.len()).unwrap_or(0);
+            GraphNode {
+                id: a.id.to_string(),
+                label: format!("@{}", a.username),
+                tier: a.tier.to_string(),
+                size: match a.tier {
+                    Tier::Tier1 => 20.0,
+                    Tier::Tier2 => 12.0,
+                    Tier::Tier3 => 6.0,
+                },
+                post_count,
+                follower_count,
+                following_count,
+                stance: a.stance.to_string(),
+                sentiment: a.sentiment_bias,
+            }
         })
         .collect();
 

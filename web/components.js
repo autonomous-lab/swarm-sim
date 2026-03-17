@@ -451,42 +451,77 @@ function esc(str) {
 }
 
 // ================================================================
-// Network Graph (D3.js force-directed)
+// Network Graph (D3.js force-directed) — MiroFish-style
 // ================================================================
 
 let _graphSimulation = null;
+let _graphState = null; // { nodes, links, nodeCount, edgeCount, nodeMap, svg, g, link, node, simulation, container, zoomBehavior }
+
+// Vibrant color palette for individual agents
+const AGENT_COLORS = [
+  '#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#1abc9c',
+  '#3498db', '#9b59b6', '#e91e63', '#00bcd4', '#ff5722',
+  '#8bc34a', '#ff9800', '#673ab7', '#009688', '#f44336',
+  '#2196f3', '#4caf50', '#ff6f00', '#7c4dff', '#00e676',
+  '#ff1744', '#651fff', '#00b0ff', '#76ff03', '#ffc400',
+  '#d500f9', '#1de9b6', '#ff3d00', '#304ffe', '#64dd17',
+];
 
 function renderNetworkGraph(data, container) {
-  // Clear previous
-  container.innerHTML = '';
-  if (_graphSimulation) { _graphSimulation.stop(); _graphSimulation = null; }
-
   if (!data.nodes || data.nodes.length === 0) {
     container.innerHTML = '<div style="color:var(--text-muted);padding:40px;text-align:center">No agents yet. Launch a simulation to see the network.</div>';
+    _graphState = null;
+    if (_graphSimulation) { _graphSimulation.stop(); _graphSimulation = null; }
     return;
   }
+
+  // Incremental update: if same nodes exist, just update edges + node data
+  if (_graphState && _graphState.container === container && _graphState.nodeCount === data.nodes.length) {
+    _updateGraphData(data);
+    return;
+  }
+
+  // Full redraw needed (first render or node count changed)
+  container.innerHTML = '';
+  if (_graphSimulation) { _graphSimulation.stop(); _graphSimulation = null; }
 
   const width = container.clientWidth || 800;
   const height = container.clientHeight || 600;
 
-  const tierColor = { tier1: '#f59e0b', tier2: '#3b82f6', tier3: '#6b7280' };
   const tierLabel = { tier1: 'VIP', tier2: 'Standard', tier3: 'Figurant' };
-  const tierRadius = { tier1: 14, tier2: 8, tier3: 4 };
+  const stanceColors = { supportive: '#2ecc71', opposing: '#e74c3c', neutral: '#f39c12', observer: '#95a5a6' };
 
-  // Count tiers
-  const tierCounts = { tier1: 0, tier2: 0, tier3: 0 };
-  data.nodes.forEach(n => { tierCounts[n.tier] = (tierCounts[n.tier] || 0) + 1; });
+  // Assign unique color to each node
+  const colorMap = {};
+  data.nodes.forEach((n, i) => { colorMap[n.id] = AGENT_COLORS[i % AGENT_COLORS.length]; });
 
-  // Count connections per node
-  const inDegree = {};
-  const outDegree = {};
+  // Count connections + compute degree centrality
+  const inDegree = {}, outDegree = {};
   data.edges.forEach(e => {
     outDegree[e.source] = (outDegree[e.source] || 0) + 1;
     inDegree[e.target] = (inDegree[e.target] || 0) + 1;
   });
 
-  // Clone data for D3 (it mutates objects)
-  const nodes = data.nodes.map(n => ({ ...n }));
+  // Adaptive sizing based on node count
+  const isLarge = data.nodes.length > 50;
+  const isMassive = data.nodes.length > 100;
+
+  // Dynamic radius: base tier size + boost from connections/posts
+  const maxDegree = Math.max(1, ...data.nodes.map(n => (inDegree[n.id] || 0) + (outDegree[n.id] || 0)));
+  function nodeRadius(d) {
+    const base = d.tier === 'tier1' ? (isLarge ? 18 : 22) : d.tier === 'tier2' ? (isLarge ? 10 : 14) : (isLarge ? 5 : 8);
+    const degree = (inDegree[d.id] || 0) + (outDegree[d.id] || 0);
+    const boost = (degree / maxDegree) * (isLarge ? 6 : 10);
+    const postBoost = Math.min((d.post_count || 0) * (isLarge ? 0.8 : 1.5), isLarge ? 4 : 8);
+    return base + boost + postBoost;
+  }
+
+  // Tier counts
+  const tierCounts = { tier1: 0, tier2: 0, tier3: 0 };
+  data.nodes.forEach(n => { tierCounts[n.tier] = (tierCounts[n.tier] || 0) + 1; });
+
+  // Clone data for D3
+  const nodes = data.nodes.map(n => ({ ...n, _r: nodeRadius(n) }));
   const links = data.edges.map(e => ({ source: e.source, target: e.target }));
 
   // SVG
@@ -496,50 +531,67 @@ function renderNetworkGraph(data, container) {
     .attr('height', height)
     .attr('viewBox', [0, 0, width, height]);
 
+  // Defs: glow filter + arrow markers per color
+  const defs = svg.append('defs');
+
+  // Glow filter
+  const glow = defs.append('filter').attr('id', 'glow');
+  glow.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'coloredBlur');
+  const glowMerge = glow.append('feMerge');
+  glowMerge.append('feMergeNode').attr('in', 'coloredBlur');
+  glowMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
   // Zoom layer
   const g = svg.append('g');
-  svg.call(d3.zoom()
-    .scaleExtent([0.2, 5])
-    .on('zoom', (event) => g.attr('transform', event.transform))
-  );
+  const zoomBehavior = d3.zoom()
+    .scaleExtent([0.15, 4])
+    .on('zoom', (event) => g.attr('transform', event.transform));
+  svg.call(zoomBehavior);
 
-  // Arrow marker
-  svg.append('defs').append('marker')
-    .attr('id', 'arrowhead')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 20)
-    .attr('refY', 0)
-    .attr('markerWidth', 6)
-    .attr('markerHeight', 6)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,-4L10,0L0,4')
-    .attr('fill', '#555');
+  // Force simulation — adaptive to node count
+  const nodeCount = nodes.length;
+  const linkDist = isLarge ? 60 : 200;
+  const linkStr = isLarge ? 0.02 : 0.08;
+  const chargeT1 = isLarge ? -800 : -2000;
+  const chargeT2 = isLarge ? -400 : -1200;
+  const chargeT3 = isLarge ? -150 : -600;
+  const collideGap = isLarge ? 8 : 25;
 
-  // Force simulation
   const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(80))
-    .force('charge', d3.forceManyBody().strength(d => d.tier === 'tier1' ? -300 : d.tier === 'tier2' ? -150 : -50))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide().radius(d => tierRadius[d.tier] + 4));
-
+    .force('link', d3.forceLink(links).id(d => d.id).distance(linkDist).strength(linkStr))
+    .force('charge', d3.forceManyBody().strength(d => d.tier === 'tier1' ? chargeT1 : d.tier === 'tier2' ? chargeT2 : chargeT3).distanceMax(isLarge ? 400 : 800))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.01))
+    .force('collide', d3.forceCollide().radius(d => d._r + collideGap).strength(1).iterations(isLarge ? 2 : 3))
+    .force('x', d3.forceX(width / 2).strength(isLarge ? 0.015 : 0.008))
+    .force('y', d3.forceY(height / 2).strength(isLarge ? 0.015 : 0.008))
+    .alphaDecay(isLarge ? 0.02 : 0.01)
+    .velocityDecay(0.3);
   _graphSimulation = simulation;
 
-  // Links
-  const link = g.append('g')
-    .selectAll('line')
+  // Links — curved paths, adaptive opacity
+  const edgeCount = links.length;
+  const defaultEdgeOpacity = edgeCount > 500 ? 0.06 : edgeCount > 200 ? 0.1 : 0.15;
+  const defaultEdgeWidth = edgeCount > 500 ? 0.7 : edgeCount > 200 ? 0.9 : 1.2;
+
+  const linkGroup = g.append('g').attr('class', 'graph-links');
+  const link = linkGroup.selectAll('path')
     .data(links)
-    .join('line')
-    .attr('stroke', '#333')
-    .attr('stroke-opacity', 0.3)
-    .attr('stroke-width', 0.5)
-    .attr('marker-end', 'url(#arrowhead)');
+    .join('path')
+    .attr('fill', 'none')
+    .attr('stroke', d => {
+      const c = colorMap[d.source.id || d.source] || '#555';
+      return c;
+    })
+    .attr('stroke-opacity', defaultEdgeOpacity)
+    .attr('stroke-width', defaultEdgeWidth);
 
   // Node groups
-  const node = g.append('g')
-    .selectAll('g')
+  const nodeGroup = g.append('g').attr('class', 'graph-nodes');
+  const node = nodeGroup.selectAll('g')
     .data(nodes)
     .join('g')
+    .attr('class', 'graph-node')
+    .style('cursor', 'pointer')
     .call(d3.drag()
       .on('start', (event, d) => {
         if (!event.active) simulation.alphaTarget(0.3).restart();
@@ -552,24 +604,58 @@ function renderNetworkGraph(data, container) {
       })
     );
 
-  // Node circles
-  node.append('circle')
-    .attr('r', d => tierRadius[d.tier])
-    .attr('fill', d => tierColor[d.tier])
-    .attr('stroke', d => d.tier === 'tier1' ? '#fbbf24' : 'transparent')
-    .attr('stroke-width', d => d.tier === 'tier1' ? 3 : 0)
-    .attr('opacity', d => d.tier === 'tier3' ? 0.6 : 1);
-
-  // VIP labels (always visible)
+  // Outer glow ring (VIP only)
   node.filter(d => d.tier === 'tier1')
-    .append('text')
+    .append('circle')
+    .attr('r', d => d._r + 4)
+    .attr('fill', 'none')
+    .attr('stroke', d => colorMap[d.id])
+    .attr('stroke-width', 2)
+    .attr('stroke-opacity', 0.3)
+    .attr('filter', 'url(#glow)');
+
+  // Main circle
+  node.append('circle')
+    .attr('r', d => d._r)
+    .attr('fill', d => colorMap[d.id])
+    .attr('stroke', '#fff')
+    .attr('stroke-width', d => d.tier === 'tier1' ? 3 : d.tier === 'tier2' ? 2 : 1)
+    .attr('stroke-opacity', d => d.tier === 'tier3' ? 0.4 : 0.8);
+
+  // Initials inside node
+  node.append('text')
+    .text(d => {
+      const name = d.label.replace('@', '');
+      return name.length <= 3 ? name : name.slice(0, 2).toUpperCase();
+    })
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => d._r > 12 ? '0.35em' : '0.3em')
+    .attr('fill', '#fff')
+    .attr('font-size', d => Math.max(8, d._r * 0.6) + 'px')
+    .attr('font-weight', '700')
+    .style('pointer-events', 'none')
+    .style('text-shadow', '0 1px 2px rgba(0,0,0,0.5)');
+
+  // Labels below nodes — hide tier3 when large graph
+  node.append('text')
+    .attr('class', 'node-label')
     .text(d => d.label)
-    .attr('x', d => tierRadius[d.tier] + 4)
-    .attr('y', 4)
-    .attr('fill', '#f59e0b')
-    .attr('font-size', '11px')
-    .attr('font-weight', '600')
-    .style('pointer-events', 'none');
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => d._r + 14)
+    .attr('fill', d => d.tier === 'tier1' ? '#fff' : d.tier === 'tier2' ? '#ccc' : '#888')
+    .attr('font-size', d => d.tier === 'tier1' ? '12px' : d.tier === 'tier2' ? '10px' : '9px')
+    .attr('font-weight', d => d.tier === 'tier1' ? '700' : '400')
+    .style('pointer-events', 'none')
+    .style('opacity', d => (isLarge && d.tier === 'tier3') ? 0 : 1);
+
+  // Stance indicator dot
+  node.append('circle')
+    .attr('r', d => d.tier === 'tier3' ? 3 : 4)
+    .attr('cx', d => d._r * 0.7)
+    .attr('cy', d => -d._r * 0.7)
+    .attr('fill', d => stanceColors[d.stance] || '#95a5a6')
+    .attr('stroke', '#111')
+    .attr('stroke-width', 1);
 
   // Tooltip
   const tooltip = d3.select(container)
@@ -577,52 +663,228 @@ function renderNetworkGraph(data, container) {
     .attr('class', 'graph-tooltip')
     .style('opacity', 0);
 
-  node.on('mouseover', (event, d) => {
-    const followers = inDegree[d.id] || 0;
-    const following = outDegree[d.id] || 0;
-    tooltip.transition().duration(150).style('opacity', 1);
-    tooltip.html(`
-      <strong>${d.label}</strong><br>
-      <span style="color:${tierColor[d.tier]}">${tierLabel[d.tier]}</span><br>
-      ${followers} followers &middot; ${following} following
-    `)
-      .style('left', (event.offsetX + 12) + 'px')
-      .style('top', (event.offsetY - 10) + 'px');
+  let _selectedNode = null;
 
-    // Highlight connected
-    link.attr('stroke-opacity', l =>
-      l.source.id === d.id || l.target.id === d.id ? 0.8 : 0.1
-    ).attr('stroke', l =>
-      l.source.id === d.id || l.target.id === d.id ? tierColor[d.tier] : '#333'
-    );
+  node.on('mouseover', (event, d) => {
+    tooltip.transition().duration(100).style('opacity', 1);
+    const stanceColor = stanceColors[d.stance] || '#95a5a6';
+    tooltip.html(`
+      <div class="gt-header" style="border-left:3px solid ${colorMap[d.id]};padding-left:8px">
+        <strong>${d.label}</strong>
+        <span class="gt-tier gt-${d.tier}">${tierLabel[d.tier]}</span>
+      </div>
+      <div class="gt-stats">
+        <span>${d.follower_count || 0} followers</span>
+        <span>${d.following_count || 0} following</span>
+        <span>${d.post_count || 0} posts</span>
+      </div>
+      <div class="gt-stance" style="color:${stanceColor}">${d.stance || 'unknown'}</div>
+    `)
+      .style('left', (event.offsetX + 16) + 'px')
+      .style('top', (event.offsetY - 16) + 'px');
+
+    if (!_selectedNode) highlightNode(d);
+  })
+  .on('mousemove', (event) => {
+    tooltip.style('left', (event.offsetX + 16) + 'px')
+           .style('top', (event.offsetY - 16) + 'px');
   })
   .on('mouseout', () => {
-    tooltip.transition().duration(300).style('opacity', 0);
-    link.attr('stroke-opacity', 0.3).attr('stroke', '#333');
+    tooltip.transition().duration(200).style('opacity', 0);
+    if (!_selectedNode) resetHighlight();
+  })
+  .on('click', (event, d) => {
+    event.stopPropagation();
+    if (_selectedNode === d.id) {
+      _selectedNode = null;
+      resetHighlight();
+    } else {
+      _selectedNode = d.id;
+      highlightNode(d);
+    }
   });
+
+  svg.on('click', () => {
+    _selectedNode = null;
+    resetHighlight();
+  });
+
+  function highlightNode(d) {
+    const curLink = _graphState ? _graphState.link : link;
+    const curLinks = _graphState ? _graphState.links : links;
+    const connected = new Set();
+    connected.add(d.id);
+    curLinks.forEach(l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      if (sid === d.id) connected.add(tid);
+      if (tid === d.id) connected.add(sid);
+    });
+
+    node.style('opacity', n => connected.has(n.id) ? 1 : 0.08);
+    // Show labels for connected nodes
+    node.selectAll('.node-label').style('opacity', n =>
+      connected.has(n.id) ? 1 : 0
+    );
+    curLink.attr('stroke-opacity', l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      return (sid === d.id || tid === d.id) ? 0.7 : 0.01;
+    }).attr('stroke-width', l => {
+      const sid = l.source.id || l.source;
+      const tid = l.target.id || l.target;
+      return (sid === d.id || tid === d.id) ? 2.5 : defaultEdgeWidth;
+    });
+  }
+
+  function resetHighlight() {
+    const curLink = _graphState ? _graphState.link : link;
+    node.style('opacity', 1);
+    // Restore label visibility
+    node.selectAll('.node-label').style('opacity', d =>
+      (isLarge && d.tier === 'tier3') ? 0 : 1
+    );
+    curLink.attr('stroke-opacity', defaultEdgeOpacity).attr('stroke-width', defaultEdgeWidth);
+  }
+
+  // Curved link path generator
+  function linkArc(d) {
+    const dx = d.target.x - d.source.x;
+    const dy = d.target.y - d.source.y;
+    const dr = Math.sqrt(dx * dx + dy * dy) * 1.5;
+    return `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,1 ${d.target.x},${d.target.y}`;
+  }
 
   // Tick
   simulation.on('tick', () => {
-    link
-      .attr('x1', d => d.source.x)
-      .attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x)
-      .attr('y2', d => d.target.y);
+    link.attr('d', linkArc);
     node.attr('transform', d => `translate(${d.x},${d.y})`);
   });
 
   // Legend
-  const legend = d3.select(container)
-    .append('div')
-    .attr('class', 'graph-legend');
+  const legend = d3.select(container).append('div').attr('class', 'graph-legend');
 
+  // Tier counts
+  const tierIcons = { tier1: '★', tier2: '●', tier3: '·' };
+  const tierColors = { tier1: '#f59e0b', tier2: '#3b82f6', tier3: '#6b7280' };
   ['tier1', 'tier2', 'tier3'].forEach(tier => {
-    legend.append('div')
-      .attr('class', 'graph-legend-item')
-      .html(`<span class="graph-legend-dot" style="background:${tierColor[tier]}"></span>${tierLabel[tier]} (${tierCounts[tier]})`);
+    legend.append('div').attr('class', 'graph-legend-item')
+      .html(`<span class="graph-legend-dot" style="background:${tierColors[tier]}">${tier === 'tier1' ? '★' : ''}</span>${tierLabel[tier]} (${tierCounts[tier]})`);
   });
 
-  legend.append('div')
-    .attr('class', 'graph-legend-item graph-legend-total')
-    .html(`${data.edges.length} connections`);
+  // Stance legend
+  legend.append('div').attr('class', 'graph-legend-divider');
+  Object.entries(stanceColors).forEach(([stance, color]) => {
+    legend.append('div').attr('class', 'graph-legend-item')
+      .html(`<span class="graph-legend-dot" style="background:${color}"></span>${stance}`);
+  });
+
+  legend.append('div').attr('class', 'graph-legend-item graph-legend-total')
+    .html(`${data.nodes.length} agents · ${data.edges.length} connections`);
+
+  // Auto-zoom to fit all nodes after layout settles
+  let _autoZoomed = false;
+  simulation.on('end', () => {
+    if (_autoZoomed) return;
+    _autoZoomed = true;
+    const padding = 60;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    nodes.forEach(n => {
+      minX = Math.min(minX, n.x - n._r);
+      maxX = Math.max(maxX, n.x + n._r);
+      minY = Math.min(minY, n.y - n._r);
+      maxY = Math.max(maxY, n.y + n._r);
+    });
+    const bw = maxX - minX + padding * 2;
+    const bh = maxY - minY + padding * 2;
+    const scale = Math.min(width / bw, height / bh, 0.9);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    svg.transition().duration(800).call(
+      zoomBehavior.transform,
+      d3.zoomIdentity.translate(width / 2, height / 2).scale(scale).translate(-cx, -cy)
+    );
+  });
+
+  // Save state for incremental updates
+  const nodeMap = {};
+  nodes.forEach(n => { nodeMap[n.id] = n; });
+  _graphState = {
+    container, svg, g, link, node, simulation, nodes, links, nodeMap,
+    linkGroup, nodeGroup, zoomBehavior, tooltip,
+    nodeCount: data.nodes.length,
+    edgeCount: data.edges.length,
+    colorMap, inDegree, outDegree,
+    tierLabel, stanceColors, nodeRadius: nodeRadius,
+    _selectedNode, highlightNode, resetHighlight, linkArc,
+    defaultEdgeOpacity, defaultEdgeWidth, isLarge,
+  };
+}
+
+// Incremental graph update — preserves positions, only updates edges + node stats
+function _updateGraphData(data) {
+  const gs = _graphState;
+  if (!gs) return;
+
+  // Update node data (post counts, follower counts, etc.)
+  data.nodes.forEach(n => {
+    const existing = gs.nodeMap[n.id];
+    if (existing) {
+      existing.post_count = n.post_count;
+      existing.follower_count = n.follower_count;
+      existing.following_count = n.following_count;
+      existing.stance = n.stance;
+      existing.sentiment = n.sentiment;
+    }
+  });
+
+  // Check if edges changed
+  if (data.edges.length === gs.edgeCount) return; // Nothing new
+
+  // Recount degrees
+  const inDegree = {}, outDegree = {};
+  data.edges.forEach(e => {
+    outDegree[e.source] = (outDegree[e.source] || 0) + 1;
+    inDegree[e.target] = (inDegree[e.target] || 0) + 1;
+  });
+  gs.inDegree = inDegree;
+  gs.outDegree = outDegree;
+
+  // Build new links (mapping to existing node objects)
+  const newLinks = data.edges.map(e => ({
+    source: gs.nodeMap[e.source] || e.source,
+    target: gs.nodeMap[e.target] || e.target,
+  }));
+
+  // Recalculate adaptive opacity for new edge count
+  const newEdgeCount = data.edges.length;
+  gs.defaultEdgeOpacity = newEdgeCount > 500 ? 0.06 : newEdgeCount > 200 ? 0.1 : 0.15;
+  gs.defaultEdgeWidth = newEdgeCount > 500 ? 0.7 : newEdgeCount > 200 ? 0.9 : 1.2;
+
+  // Update link selection
+  gs.link = gs.linkGroup.selectAll('path')
+    .data(newLinks)
+    .join('path')
+    .attr('fill', 'none')
+    .attr('stroke', d => {
+      const sid = d.source.id || d.source;
+      return gs.colorMap[sid] || '#555';
+    })
+    .attr('stroke-opacity', gs.defaultEdgeOpacity)
+    .attr('stroke-width', gs.defaultEdgeWidth);
+
+  // Update simulation links
+  gs.links.length = 0;
+  gs.links.push(...newLinks);
+  gs.simulation.force('link').links(newLinks);
+  gs.simulation.alpha(0.1).restart();
+
+  gs.edgeCount = data.edges.length;
+  gs.link = gs.link; // reassign for highlight functions
+
+  // Update legend total
+  const legendTotal = gs.container.querySelector('.graph-legend-total');
+  if (legendTotal) {
+    legendTotal.innerHTML = `${data.nodes.length} agents · ${data.edges.length} connections`;
+  }
 }

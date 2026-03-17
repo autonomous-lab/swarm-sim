@@ -146,6 +146,22 @@ The web interface runs at `http://localhost:3000` (configurable) and provides a 
 
 Three-panel layout: agents list (left), live feed with posts/replies/likes (center), and God's Eye event injection + stats (right). Posts are color-coded by tier and action type.
 
+### Dashboard
+
+<p align="center">
+  <img src="screenshots/dashboard-view.png" alt="swarm-sim dashboard" width="100%">
+</p>
+
+Real-time stats: agent count, post volume, engagement metrics, tier distribution bars, activity-per-round chart, and top agents ranked by engagement.
+
+### Network Graph
+
+<p align="center">
+  <img src="screenshots/network-view.png" alt="swarm-sim network graph" width="100%">
+</p>
+
+Interactive D3.js force-directed graph showing the social network. Nodes are sized by follower count, colored by tier (gold = VIP, blue = Standard, green = Figurant). Edges represent follow relationships. Click any node to inspect the agent.
+
 ### Launcher
 
 <p align="center">
