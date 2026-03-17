@@ -475,8 +475,9 @@ ACTIONS:
 - reply: "target_post_id" + "content"
 - like: "target_post_id"
 - repost: "target_post_id"
+- quote_repost: "target_post_id" + "content" (share a post with your own commentary)
 - follow: "target_agent_id"
-- do_nothing: skip{propose_solution_action}
+- do_nothing: skip{challenge_actions}
 
 JSON ONLY (pin_memory is optional — only include if you want to remember something specific):
 {{
@@ -488,8 +489,8 @@ JSON ONLY (pin_memory is optional — only include if you want to remember somet
         bio = agent.bio,
         stance = runtime_stance,
         sentiment = current_sentiment,
-        propose_solution_action = if challenge_question.is_some() {
-            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)"
+        challenge_actions = if challenge_question.is_some() {
+            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)\n- vote_solution: \"target_post_id\" (vote for a solution you support)\n- refine_solution: \"target_post_id\" + \"content\" (improve an existing solution)"
         } else {
             ""
         },
@@ -508,12 +509,20 @@ pub fn build_single_user_prompt(
     events: &[String],
     challenge_question: Option<&str>,
     own_recent_posts: &[String],
+    notifications: &[String],
 ) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
         "ROUND {round}/{total_rounds} | Time: {simulated_time}"
     ));
+
+    if !notifications.is_empty() {
+        parts.push("\nNOTIFICATIONS (what happened since last round):".into());
+        for n in notifications {
+            parts.push(format!("  - {n}"));
+        }
+    }
 
     if !own_recent_posts.is_empty() {
         parts.push("\nYOUR RECENT POSTS (DO NOT repeat these — make a completely new point):".into());
@@ -592,12 +601,12 @@ pub fn build_single_user_prompt(
 
 /// Build the system prompt for a batch of agents (Tier 2/3).
 pub fn build_batch_system_prompt(
-    agents: &[(AgentProfile, String, f32, Vec<String>)],
+    agents: &[(AgentProfile, String, f32, Vec<String>, Vec<String>)],
     persona_max_chars: usize,
     challenge_question: Option<&str>,
 ) -> String {
     let mut agent_descs = String::new();
-    for (agent, memory_short, sentiment, own_posts) in agents {
+    for (agent, memory_short, sentiment, own_posts, notifs) in agents {
         let (_behavior, _action_mix, style) = agent.archetype.prompt_instructions();
         let runtime_stance = Stance::from_sentiment(*sentiment);
         agent_descs.push_str(&format!(
@@ -616,6 +625,13 @@ pub fn build_batch_system_prompt(
             }
             agent_descs.push('\n');
         }
+        if !notifs.is_empty() {
+            agent_descs.push_str("Notifications: ");
+            for n in notifs.iter().take(3) {
+                agent_descs.push_str(&format!("{} | ", n));
+            }
+            agent_descs.push('\n');
+        }
     }
 
     format!(
@@ -624,8 +640,8 @@ pub fn build_batch_system_prompt(
 These people are LIVING through this event RIGHT NOW. They are not commentators analyzing from the outside. They are personally affected, scared, angry, amused, confused, or opportunistic.
 
 STYLE RULES:
-- Lurkers: 1-5 words ONLY. Mostly just like/repost. No hashtags.
-- Normies: 1-2 casual sentences. Abbreviations (lol, tbh, ngl, idk, bruh, omg). NO analysis. No hashtags.
+- Lurkers: SILENT. You MUST only use "like" or "repost". You are NOT ALLOWED to create_post or write replies longer than 3 words. If you reply, use max 3 words like "lol", "this", "fr fr". One action MAX.
+- Normies: 1 casual sentence MAX. Abbreviations (lol, tbh, ngl, idk, bruh, omg). Prefer like/repost over posting. NO analysis. No hashtags. Two actions MAX.
 - Shitposters: 1 sarcastic sentence. Deadpan humor, absurd comparisons. No hashtags.
 - Cheerleaders: 1-2 excited sentences. Exclamation marks. No hashtags.
 - Provocateurs: 1-2 aggressive sentences. Disagree, challenge, mock. No hashtags.
@@ -637,8 +653,10 @@ HASHTAG RULE: Almost NO ONE should use hashtags. Only activists may use MAX 1 pe
 
 LANGUAGE RULE: Use contractions (don't, can't, it's, they're). Use lowercase when casual. Real tweets are messy and imperfect.
 
-Most users should like/repost/reply — NOT everyone needs to create_post.
-Replies can be to original posts OR to other users' replies (threaded conversations). Replying to a reply is natural and encouraged.
+IMPORTANT: Most users should like/repost — NOT everyone needs to create_post or reply.
+At least 50% of actions across all users should be likes or reposts.
+Lurkers MUST only like or repost. Normies should mostly like/repost with occasional 1-sentence reply.
+Replies can be to original posts OR to other users' replies (threaded conversations).
 Use exact post IDs shown in [brackets] for reply/like/repost.
 
 USERS:
@@ -648,8 +666,9 @@ ACTIONS (0-2 per user):
 - reply: "target_post_id" + "content"
 - like: "target_post_id"
 - repost: "target_post_id"
+- quote_repost: "target_post_id" + "content" (share with commentary)
 - follow: "target_agent_id"
-- do_nothing: skip{propose_solution_action}
+- do_nothing: skip{challenge_actions}
 
 CRITICAL — UNIQUENESS RULES (violations will be rejected):
 1. Each user MUST express a COMPLETELY DIFFERENT thought. NO two users can share the same point, angle, or conclusion.
@@ -667,8 +686,8 @@ JSON ONLY (pin_memory field is optional — omit it or set to null if nothing to
   ]
 }}"#,
         n = agents.len(),
-        propose_solution_action = if challenge_question.is_some() {
-            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)"
+        challenge_actions = if challenge_question.is_some() {
+            "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)\n- vote_solution: \"target_post_id\" (vote for a solution you support)\n- refine_solution: \"target_post_id\" + \"content\" (improve an existing solution)"
         } else {
             ""
         },

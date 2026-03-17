@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Root config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimConfig {
     pub simulation: SimulationSettings,
     pub tiers: TierConfig,
@@ -19,13 +19,15 @@ pub struct SimConfig {
     pub god_eye: GodEyeConfig,
     #[serde(default)]
     pub synthesis: SynthesisConfig,
+    #[serde(default)]
+    pub webhooks: WebhookConfig,
 }
 
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationSettings {
     pub total_rounds: u32,
     pub minutes_per_round: u32,
@@ -37,14 +39,14 @@ pub struct SimulationSettings {
     pub challenge_question: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierConfig {
     pub tier1: TierSettings,
     pub tier2: TierSettings,
     pub tier3: TierSettings,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierSettings {
     pub batch_size: usize,
     pub model: String,
@@ -60,16 +62,20 @@ pub struct TierSettings {
     pub max_retries: u32,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub input_price_per_mtok: f64,
+    #[serde(default)]
+    pub output_price_per_mtok: f64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub extraction_model: String,
     pub extraction_base_url: String,
     pub extraction_api_key: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldConfig {
     #[serde(default = "default_feed_size")]
     pub feed_size: usize,
@@ -83,7 +89,7 @@ pub struct WorldConfig {
     pub relevance_weight: f32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParserConfig {
     #[serde(default = "default_max_chars")]
     pub max_chars_per_doc: usize,
@@ -93,7 +99,7 @@ pub struct ParserConfig {
     pub chunk_overlap: usize,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfig {
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
@@ -105,7 +111,7 @@ pub struct OutputConfig {
     pub verbose: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -115,7 +121,7 @@ pub struct ServerConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GodEyeConfig {
     #[serde(default = "default_events_file")]
     pub events_file: PathBuf,
@@ -125,7 +131,7 @@ pub struct GodEyeConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynthesisConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -141,6 +147,26 @@ impl Default for SynthesisConfig {
             enabled: true,
             every_n_rounds: 3,
             max_tokens: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            events: Vec::new(),
+            enabled: false,
         }
     }
 }

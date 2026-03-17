@@ -87,6 +87,22 @@ impl std::fmt::Display for BehaviorArchetype {
 }
 
 impl BehaviorArchetype {
+    /// Max number of actions per round for this archetype.
+    pub fn max_actions(&self) -> usize {
+        match self {
+            BehaviorArchetype::Lurker => 1,
+            BehaviorArchetype::Normie => 2,
+            BehaviorArchetype::Shitposter => 2,
+            BehaviorArchetype::Cheerleader => 2,
+            _ => 3,
+        }
+    }
+
+    /// Whether this archetype should be blocked from creating original posts.
+    pub fn prefers_engagement_only(&self) -> bool {
+        matches!(self, BehaviorArchetype::Lurker | BehaviorArchetype::Cheerleader)
+    }
+
     /// Max post length in characters for this archetype.
     pub fn max_post_length(&self) -> u16 {
         match self {
@@ -230,6 +246,8 @@ pub struct AgentState {
     pub action_log: Vec<ActionLogEntry>,
     pub current_sentiment: f32,
     pub sentiment_history: Vec<(u32, f32)>,
+    #[serde(default)]
+    pub pending_notifications: Vec<String>,
 }
 
 impl AgentState {
@@ -244,6 +262,7 @@ impl AgentState {
             action_log: Vec::new(),
             current_sentiment: 0.0,
             sentiment_history: Vec::new(),
+            pending_notifications: Vec::new(),
         }
     }
 
@@ -258,6 +277,7 @@ impl AgentState {
             action_log: Vec::new(),
             current_sentiment: initial_sentiment,
             sentiment_history: vec![(0, initial_sentiment)],
+            pending_notifications: Vec::new(),
         }
     }
 

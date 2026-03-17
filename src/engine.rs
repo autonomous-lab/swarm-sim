@@ -6,17 +6,19 @@ use rand::Rng;
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::agent::{ActionLogEntry, AgentProfile, AgentState, Stance, Tier};
+use crate::agent::{ActionLogEntry, AgentProfile, AgentState, BehaviorArchetype, Stance, Tier};
 use crate::config::SimConfig;
 use crate::llm::{self, LlmClient, PostSummary};
 use crate::output::{self, ActionLogger};
 use crate::world::*;
 
+use regex_lite::Regex;
+
 // ---------------------------------------------------------------------------
 // Shared state (engine <-> server)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SimStatus {
     Idle,
@@ -37,11 +39,12 @@ pub struct SimSnapshot {
     pub scenario_prompt: String,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub estimated_cost: f64,
 }
 
 pub type SharedState = Arc<RwLock<SimulationState>>;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimulationState {
     pub status: SimStatus,
     pub agents: HashMap<Uuid, AgentProfile>,
@@ -56,6 +59,8 @@ pub struct SimulationState {
 
 impl SimulationState {
     pub fn snapshot(&self) -> SimSnapshot {
+        // Sum up cost across all tiers
+        let cost = self.estimate_cost();
         SimSnapshot {
             status: self.status.clone(),
             current_round: self.world.current_round,
@@ -66,6 +71,36 @@ impl SimulationState {
             scenario_prompt: self.config.simulation.scenario_prompt.clone(),
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
+            estimated_cost: cost,
+        }
+    }
+
+    /// Save state to a JSON file.
+    pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        tracing::info!("State saved to {}", path.display());
+        Ok(())
+    }
+
+    /// Load state from a JSON file.
+    pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let json = std::fs::read_to_string(path)?;
+        let mut state: Self = serde_json::from_str(&json)?;
+        state.status = SimStatus::Finished; // Always start as finished after load
+        tracing::info!("State loaded from {}", path.display());
+        Ok(state)
+    }
+
+    fn estimate_cost(&self) -> f64 {
+        // Use tier1 pricing as representative (all tiers use same model in typical config)
+        let input_price = self.config.tiers.tier1.input_price_per_mtok;
+        let output_price = self.config.tiers.tier1.output_price_per_mtok;
+        if input_price == 0.0 && output_price == 0.0 {
+            // Default Gemini 2.0 Flash pricing: $0.10/1M in, $0.40/1M out
+            (self.prompt_tokens as f64 * 0.10 + self.completion_tokens as f64 * 0.40) / 1_000_000.0
+        } else {
+            (self.prompt_tokens as f64 * input_price + self.completion_tokens as f64 * output_price) / 1_000_000.0
         }
     }
 }
@@ -87,6 +122,7 @@ pub enum WsEvent {
         summary: RoundSummary,
         prompt_tokens: u64,
         completion_tokens: u64,
+        estimated_cost: f64,
     },
     #[serde(rename = "god_eye_inject")]
     GodEyeInject { event: InjectedEvent },
@@ -219,12 +255,25 @@ impl SimulationEngine {
             // Update token counts from LLM client
             let (pt, ct) = self.llm.token_usage();
 
+            // Calculate cost
+            let cost = {
+                let s = self.state.read().await;
+                let input_price = s.config.tiers.tier1.input_price_per_mtok;
+                let output_price = s.config.tiers.tier1.output_price_per_mtok;
+                if input_price == 0.0 && output_price == 0.0 {
+                    (pt as f64 * 0.10 + ct as f64 * 0.40) / 1_000_000.0
+                } else {
+                    (pt as f64 * input_price + ct as f64 * output_price) / 1_000_000.0
+                }
+            };
+
             // Broadcast round end
             let _ = self.ws_tx.send(WsEvent::RoundEnd {
                 round,
                 summary: summary.clone(),
                 prompt_tokens: pt,
                 completion_tokens: ct,
+                estimated_cost: cost,
             });
 
             // Update state
@@ -234,6 +283,9 @@ impl SimulationEngine {
                 s.prompt_tokens = pt;
                 s.completion_tokens = ct;
             }
+
+            // Fire webhook if configured
+            fire_webhook_if_needed(&config, "round_end", &serde_json::json!({"round": round}));
 
             // Generate synthesis if needed
             if config.synthesis.enabled
@@ -255,6 +307,7 @@ impl SimulationEngine {
         }
 
         pb.finish_with_message("Simulation complete");
+        fire_webhook_if_needed(&config, "simulation_end", &serde_json::json!({"total_rounds": config.simulation.total_rounds}));
 
         {
             let mut s = self.state.write().await;
@@ -339,11 +392,22 @@ impl SimulationEngine {
             let summary = self.execute_round(round, &config, &mut logger, verbose).await?;
 
             let (pt, ct) = self.llm.token_usage();
+            let cost = {
+                let s = self.state.read().await;
+                let input_price = s.config.tiers.tier1.input_price_per_mtok;
+                let output_price = s.config.tiers.tier1.output_price_per_mtok;
+                if input_price == 0.0 && output_price == 0.0 {
+                    (pt as f64 * 0.10 + ct as f64 * 0.40) / 1_000_000.0
+                } else {
+                    (pt as f64 * input_price + ct as f64 * output_price) / 1_000_000.0
+                }
+            };
             let _ = self.ws_tx.send(WsEvent::RoundEnd {
                 round,
                 summary: summary.clone(),
                 prompt_tokens: pt,
                 completion_tokens: ct,
+                estimated_cost: cost,
             });
 
             {
@@ -492,6 +556,7 @@ impl SimulationEngine {
                 new_replies: 0,
                 new_likes: 0,
                 new_reposts: 0,
+                new_quote_reposts: 0,
                 new_follows: 0,
                 events_injected: injected_count,
                 new_solutions: 0,
@@ -499,8 +564,42 @@ impl SimulationEngine {
         }
 
         // 4. Execute tiers SEQUENTIALLY to preserve causal chains (T1 → T2 → T3)
-        let event_descriptions = self.get_event_descriptions_for_round().await;
+        let mut event_descriptions = self.get_event_descriptions_for_round().await;
         let mut all_actions: Vec<Action> = Vec::new();
+
+        // Devil's advocate round: every 5th round when challenge is active, inject special directive to T1
+        let is_devil_advocate = config.simulation.challenge_question.is_some()
+            && round > 1
+            && round % 5 == 0;
+        if is_devil_advocate {
+            // Get top solutions by votes/engagement
+            let top_solutions = {
+                let s = self.state.read().await;
+                let mut sols: Vec<(String, String, usize)> = s.world.solution_ids.iter()
+                    .filter_map(|id| {
+                        let p = s.world.posts.get(id)?;
+                        let votes = s.world.solution_votes.get(id).map(|v| v.len()).unwrap_or(0);
+                        let content: String = p.content.chars().take(120).collect();
+                        Some((p.author_name.clone(), content, votes))
+                    })
+                    .collect();
+                sols.sort_by(|a, b| b.2.cmp(&a.2));
+                sols.truncate(3);
+                sols
+            };
+
+            if !top_solutions.is_empty() {
+                let sol_list: String = top_solutions.iter().enumerate()
+                    .map(|(i, (author, content, votes))| format!("{}. @{} ({} votes): \"{}\"", i + 1, author, votes, content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                event_descriptions.push(format!(
+                    "[DEVIL'S ADVOCATE ROUND] This is a special challenge round. Your job is to find WEAKNESSES and COUNTER-ARGUMENTS to the top solutions. Be constructive but critical. Push back on assumptions. Top solutions so far:\n{}",
+                    sol_list
+                ));
+                tracing::info!("Round {round}: Devil's advocate activated with {} solutions", top_solutions.len());
+            }
+        }
 
         // Tier 1 — VIPs set the narrative
         let t1_actions = if !active_tier1.is_empty() {
@@ -550,14 +649,18 @@ impl SimulationEngine {
         }
         all_actions.extend(t3_actions);
 
-        // 5. Update sentiment drift
+        // 5. Build engagement notifications for next round
+        build_notifications(&self.state, &all_actions, round).await;
+
+        // 6. Update sentiment drift
         update_sentiments(&self.state, round).await;
 
-        // 6. Build round summary
+        // 7. Build round summary
         let mut new_posts = 0;
         let mut new_replies = 0;
         let mut new_likes = 0;
         let mut new_reposts = 0;
+        let mut new_quote_reposts = 0;
         let mut new_follows = 0;
         let mut new_solutions = 0;
 
@@ -567,8 +670,9 @@ impl SimulationEngine {
                 ActionType::Reply => new_replies += 1,
                 ActionType::Like => new_likes += 1,
                 ActionType::Repost => new_reposts += 1,
+                ActionType::QuoteRepost => new_quote_reposts += 1,
                 ActionType::Follow => new_follows += 1,
-                ActionType::ProposeSolution => new_solutions += 1,
+                ActionType::ProposeSolution | ActionType::RefineSolution => new_solutions += 1,
                 _ => {}
             }
         }
@@ -588,6 +692,7 @@ impl SimulationEngine {
             new_replies,
             new_likes,
             new_reposts,
+            new_quote_reposts,
             new_follows,
             events_injected: injected_count,
             new_solutions,
@@ -742,6 +847,8 @@ impl SimulationEngine {
                     simulated_time: s.world.simulated_time,
                     reply_to: None,
                     repost_of: None,
+                    quote_of: None,
+                    refines: None,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
@@ -773,6 +880,8 @@ impl SimulationEngine {
                     simulated_time: s.world.simulated_time,
                     reply_to: None,
                     repost_of: None,
+                    quote_of: None,
+                    refines: None,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
@@ -873,6 +982,11 @@ async fn execute_batch(
             })
             .unwrap_or_default();
 
+        // Collect pending notifications
+        let notifications: Vec<String> = agent_state
+            .map(|st| st.pending_notifications.clone())
+            .unwrap_or_default();
+
         let system = llm::build_single_system_prompt(&profile, current_sentiment, challenge_question.as_deref());
         let user = llm::build_single_user_prompt(
             round,
@@ -885,6 +999,7 @@ async fn execute_batch(
             events,
             challenge_question.as_deref(),
             &own_recent_posts,
+            &notifications,
         );
 
         // Build ID resolution maps before releasing lock
@@ -927,7 +1042,7 @@ async fn execute_batch(
             _ => 10,
         };
 
-        let agents_with_memory: Vec<(AgentProfile, String, f32, Vec<String>)> = agent_ids
+        let agents_with_memory: Vec<(AgentProfile, String, f32, Vec<String>, Vec<String>)> = agent_ids
             .iter()
             .filter_map(|id| {
                 let profile = s.agents.get(id)?.clone();
@@ -948,7 +1063,11 @@ async fn execute_batch(
                         }).collect()
                     })
                     .unwrap_or_default();
-                Some((profile, memory, sentiment, own_posts))
+                // Collect pending notifications
+                let notifs: Vec<String> = agent_state
+                    .map(|st| st.pending_notifications.clone())
+                    .unwrap_or_default();
+                Some((profile, memory, sentiment, own_posts, notifs))
             })
             .collect();
 
@@ -996,7 +1115,7 @@ async fn execute_batch(
         // Clone profiles for post-parse use
         let profiles: HashMap<String, (Uuid, AgentProfile)> = agents_with_memory
             .iter()
-            .map(|(p, _, _, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
+            .map(|(p, _, _, _, _)| (p.id.to_string()[..8].to_string(), (p.id, p.clone())))
             .collect();
 
         // Build ID resolution maps before releasing lock
@@ -1051,11 +1170,14 @@ fn convert_single_actions(
             "reply" => ActionType::Reply,
             "like" => ActionType::Like,
             "repost" => ActionType::Repost,
+            "quote_repost" => ActionType::QuoteRepost,
             "follow" => ActionType::Follow,
             "unfollow" => ActionType::Unfollow,
             "do_nothing" => ActionType::DoNothing,
             "pin_memory" => ActionType::PinMemory,
             "propose_solution" => ActionType::ProposeSolution,
+            "vote_solution" => ActionType::VoteSolution,
+            "refine_solution" => ActionType::RefineSolution,
             _ => continue,
         };
 
@@ -1101,6 +1223,9 @@ fn convert_single_actions(
         });
     }
 
+    // Archetype enforcement
+    enforce_archetype(&profile.archetype, &mut actions);
+
     actions
 }
 
@@ -1125,11 +1250,14 @@ fn convert_batch_actions(
                 "reply" => ActionType::Reply,
                 "like" => ActionType::Like,
                 "repost" => ActionType::Repost,
+                "quote_repost" => ActionType::QuoteRepost,
                 "follow" => ActionType::Follow,
                 "unfollow" => ActionType::Unfollow,
                 "do_nothing" => ActionType::DoNothing,
                 "pin_memory" => ActionType::PinMemory,
                 "propose_solution" => ActionType::ProposeSolution,
+                "vote_solution" => ActionType::VoteSolution,
+                "refine_solution" => ActionType::RefineSolution,
                 _ => continue,
             };
 
@@ -1173,6 +1301,12 @@ fn convert_batch_actions(
                 reasoning: None,
             });
         }
+
+        // Archetype enforcement for batch agents too
+        let agent_actions_start = actions.len() - entry.actions.len() - if entry.pin_memory.is_some() { 1 } else { 0 };
+        let mut agent_slice: Vec<Action> = actions.drain(agent_actions_start..).collect();
+        enforce_archetype(&profile.archetype, &mut agent_slice);
+        actions.extend(agent_slice);
     }
 
     actions
@@ -1332,9 +1466,12 @@ fn dedup_actions(actions: &mut Vec<Action>) {
 // ---------------------------------------------------------------------------
 
 fn apply_action(state: &mut SimulationState, action: &Action) {
+    // Sanitize content before storing
+    let clean_content = action.content.as_ref().map(|c| sanitize_content(c, state));
+
     match &action.action_type {
         ActionType::CreatePost => {
-            if let Some(content) = &action.content {
+            if let Some(content) = &clean_content {
                 let post = Post {
                     id: action.id,
                     author_id: action.agent_id,
@@ -1344,6 +1481,8 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     simulated_time: action.simulated_time,
                     reply_to: None,
                     repost_of: None,
+                    quote_of: None,
+                    refines: None,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
@@ -1356,7 +1495,7 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
             }
         }
         ActionType::Reply => {
-            if let (Some(content), Some(target)) = (&action.content, &action.target_post_id) {
+            if let (Some(content), Some(target)) = (&clean_content, &action.target_post_id) {
                 let post = Post {
                     id: action.id,
                     author_id: action.agent_id,
@@ -1366,6 +1505,8 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     simulated_time: action.simulated_time,
                     reply_to: Some(*target),
                     repost_of: None,
+                    quote_of: None,
+                    refines: None,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
@@ -1388,17 +1529,47 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     id: action.id,
                     author_id: action.agent_id,
                     author_name: action.agent_name.clone(),
-                    content: action.content.clone().unwrap_or_default(),
+                    content: clean_content.clone().unwrap_or_default(),
                     created_at_round: action.round,
                     simulated_time: action.simulated_time,
                     reply_to: None,
                     repost_of: Some(target),
+                    quote_of: None,
+                    refines: None,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
                 };
                 state.world.add_repost(target, repost);
+            }
+        }
+        ActionType::QuoteRepost => {
+            if let Some(target) = action.target_post_id {
+                let post = Post {
+                    id: action.id,
+                    author_id: action.agent_id,
+                    author_name: action.agent_name.clone(),
+                    content: clean_content.clone().unwrap_or_default(),
+                    created_at_round: action.round,
+                    simulated_time: action.simulated_time,
+                    reply_to: None,
+                    repost_of: None,
+                    quote_of: Some(target),
+                    refines: None,
+                    likes: Vec::new(),
+                    replies: Vec::new(),
+                    reposts: Vec::new(),
+                    hashtags: Vec::new(),
+                };
+                state.world.add_post(post);
+                // Also count as repost on the original
+                if let Some(original) = state.world.posts.get_mut(&target) {
+                    original.reposts.push(action.id);
+                }
+                if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
+                    agent_state.post_ids.push(action.id);
+                }
             }
         }
         ActionType::Follow => {
@@ -1432,7 +1603,7 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
             }
         }
         ActionType::ProposeSolution => {
-            if let Some(content) = &action.content {
+            if let Some(content) = &clean_content {
                 let post = Post {
                     id: action.id,
                     author_id: action.agent_id,
@@ -1442,6 +1613,47 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     simulated_time: action.simulated_time,
                     reply_to: None,
                     repost_of: None,
+                    quote_of: None,
+                    refines: None,
+                    likes: Vec::new(),
+                    replies: Vec::new(),
+                    reposts: Vec::new(),
+                    hashtags: extract_hashtags(content),
+                };
+                state.world.add_post(post);
+                state.world.solution_ids.push(action.id);
+                if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
+                    agent_state.post_ids.push(action.id);
+                }
+            }
+        }
+        ActionType::VoteSolution => {
+            if let Some(target) = action.target_post_id {
+                // Only vote if it's a known solution and agent hasn't voted yet
+                if state.world.solution_ids.contains(&target) {
+                    let voters = state.world.solution_votes.entry(target).or_default();
+                    if !voters.contains(&action.agent_id) {
+                        voters.push(action.agent_id);
+                    }
+                    // Also count as a like on the solution post
+                    state.world.add_like(target, action.agent_id);
+                }
+            }
+        }
+        ActionType::RefineSolution => {
+            if let Some(content) = &clean_content {
+                let target = action.target_post_id;
+                let post = Post {
+                    id: action.id,
+                    author_id: action.agent_id,
+                    author_name: action.agent_name.clone(),
+                    content: content.clone(),
+                    created_at_round: action.round,
+                    simulated_time: action.simulated_time,
+                    reply_to: None,
+                    repost_of: None,
+                    quote_of: None,
+                    refines: target,
                     likes: Vec::new(),
                     replies: Vec::new(),
                     reposts: Vec::new(),
@@ -1498,6 +1710,16 @@ fn describe_action(action: &Action) -> String {
         ActionType::Reply => format!("replied to a post"),
         ActionType::Like => format!("liked a post"),
         ActionType::Repost => format!("reposted"),
+        ActionType::QuoteRepost => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            format!("quote-reposted: \"{preview}\"")
+        }
         ActionType::Follow => format!("followed someone"),
         ActionType::Unfollow => format!("unfollowed someone"),
         ActionType::DoNothing => format!("idle"),
@@ -1511,6 +1733,17 @@ fn describe_action(action: &Action) -> String {
                 .take(60)
                 .collect::<String>();
             format!("proposed solution: \"{preview}\"")
+        }
+        ActionType::VoteSolution => format!("voted on a solution"),
+        ActionType::RefineSolution => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            format!("refined solution: \"{preview}\"")
         }
     }
 }
@@ -1615,6 +1848,25 @@ fn describe_action_rich(action: &Action, state: &SimulationState) -> String {
                 "I followed someone".into()
             }
         }
+        ActionType::QuoteRepost => {
+            let my_comment = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            if let Some(target_id) = action.target_post_id {
+                if let Some(target_post) = state.world.posts.get(&target_id) {
+                    let preview: String = target_post.content.chars().take(50).collect();
+                    format!("I quote-reposted @{} (\"{}...\") saying \"{}\"", target_post.author_name, preview, my_comment)
+                } else {
+                    format!("I quote-reposted: \"{my_comment}\"")
+                }
+            } else {
+                format!("I quote-reposted: \"{my_comment}\"")
+            }
+        }
         ActionType::Unfollow => "I unfollowed someone".into(),
         ActionType::DoNothing => "idle".into(),
         ActionType::PinMemory => "pinned a memory".into(),
@@ -1627,6 +1879,28 @@ fn describe_action_rich(action: &Action, state: &SimulationState) -> String {
                 .take(80)
                 .collect::<String>();
             format!("I proposed a solution: \"{preview}\"")
+        }
+        ActionType::VoteSolution => {
+            if let Some(target_id) = action.target_post_id {
+                if let Some(target_post) = state.world.posts.get(&target_id) {
+                    let preview: String = target_post.content.chars().take(50).collect();
+                    format!("I voted for @{}'s solution: \"{}...\"", target_post.author_name, preview)
+                } else {
+                    "I voted on a solution".into()
+                }
+            } else {
+                "I voted on a solution".into()
+            }
+        }
+        ActionType::RefineSolution => {
+            let preview = action
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(80)
+                .collect::<String>();
+            format!("I refined a solution: \"{preview}\"")
         }
     }
 }
@@ -1717,4 +1991,180 @@ fn extract_hashtags(content: &str) -> Vec<String> {
         .filter(|w| w.starts_with('#') && w.len() > 1)
         .map(|w| w.to_string())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Archetype enforcement — trim actions to archetype limits
+// ---------------------------------------------------------------------------
+
+fn enforce_archetype(archetype: &BehaviorArchetype, actions: &mut Vec<Action>) {
+    let max = archetype.max_actions();
+
+    // For engagement-only archetypes (Lurker, Cheerleader), convert create_post to do_nothing
+    if archetype.prefers_engagement_only() {
+        for action in actions.iter_mut() {
+            if matches!(action.action_type, ActionType::CreatePost) {
+                // Allow very short replies/posts from Cheerleader (they cheer)
+                if matches!(archetype, BehaviorArchetype::Lurker) {
+                    action.action_type = ActionType::DoNothing;
+                    action.content = None;
+                }
+            }
+        }
+    }
+
+    // Enforce max post length per archetype
+    let max_len = archetype.max_post_length() as usize;
+    for action in actions.iter_mut() {
+        if let Some(content) = &action.content {
+            if content.len() > max_len && matches!(
+                action.action_type,
+                ActionType::CreatePost | ActionType::Reply | ActionType::QuoteRepost
+            ) {
+                let truncated: String = content.chars().take(max_len).collect();
+                action.content = Some(truncated);
+            }
+        }
+    }
+
+    // Count real actions (excluding DoNothing and PinMemory)
+    let real_actions: Vec<usize> = actions
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| !matches!(a.action_type, ActionType::DoNothing | ActionType::PinMemory))
+        .map(|(i, _)| i)
+        .collect();
+
+    if real_actions.len() > max {
+        // Keep first `max` real actions, convert rest to DoNothing
+        for &idx in &real_actions[max..] {
+            actions[idx].action_type = ActionType::DoNothing;
+            actions[idx].content = None;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content sanitization — strip leaked 8-char hex IDs from post content
+// ---------------------------------------------------------------------------
+
+fn sanitize_content(content: &str, state: &SimulationState) -> String {
+    let re = Regex::new(r"\b[0-9a-f]{8}\b").unwrap();
+    let result = re.replace_all(content, |caps: &regex_lite::Captures| {
+        let matched = caps.get(0).unwrap().as_str();
+        // Check if this matches a known post or agent ID prefix
+        let is_post_id = state.world.posts.keys().any(|id| id.to_string().starts_with(matched));
+        let is_agent_id = state.agents.keys().any(|id| id.to_string().starts_with(matched));
+        if is_post_id || is_agent_id {
+            String::new() // Strip it
+        } else {
+            matched.to_string() // Keep it (could be legit hex like a color code)
+        }
+    });
+    // Clean up double spaces left by removal
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Engagement notifications — build notifications for next round
+// ---------------------------------------------------------------------------
+
+async fn build_notifications(state: &SharedState, actions: &[Action], _round: u32) {
+    let mut notifications: HashMap<Uuid, Vec<String>> = HashMap::new();
+
+    // Gather who got likes, replies, reposts this round
+    let s = state.read().await;
+    for action in actions {
+        match &action.action_type {
+            ActionType::Like => {
+                if let Some(target_id) = action.target_post_id {
+                    if let Some(post) = s.world.posts.get(&target_id) {
+                        if post.author_id != action.agent_id {
+                            notifications.entry(post.author_id).or_default()
+                                .push(format!("@{} liked your post", action.agent_name));
+                        }
+                    }
+                }
+            }
+            ActionType::Reply => {
+                if let Some(target_id) = action.target_post_id {
+                    if let Some(post) = s.world.posts.get(&target_id) {
+                        if post.author_id != action.agent_id {
+                            let preview = action.content.as_deref().unwrap_or("").chars().take(40).collect::<String>();
+                            notifications.entry(post.author_id).or_default()
+                                .push(format!("@{} replied: \"{}\"", action.agent_name, preview));
+                        }
+                    }
+                }
+            }
+            ActionType::Repost | ActionType::QuoteRepost => {
+                if let Some(target_id) = action.target_post_id {
+                    if let Some(post) = s.world.posts.get(&target_id) {
+                        if post.author_id != action.agent_id {
+                            notifications.entry(post.author_id).or_default()
+                                .push(format!("@{} reposted your post", action.agent_name));
+                        }
+                    }
+                }
+            }
+            ActionType::Follow => {
+                if let Some(target_id) = action.target_agent_id {
+                    notifications.entry(target_id).or_default()
+                        .push(format!("@{} followed you", action.agent_name));
+                }
+            }
+            ActionType::VoteSolution => {
+                if let Some(target_id) = action.target_post_id {
+                    if let Some(post) = s.world.posts.get(&target_id) {
+                        if post.author_id != action.agent_id {
+                            notifications.entry(post.author_id).or_default()
+                                .push(format!("@{} voted for your solution", action.agent_name));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    drop(s);
+
+    // Consolidate and store notifications — max 5 per agent
+    let mut s = state.write().await;
+    for (agent_id, notifs) in notifications {
+        if let Some(agent_state) = s.agent_states.get_mut(&agent_id) {
+            let consolidated = if notifs.len() > 5 {
+                let mut summary = notifs[..3].to_vec();
+                summary.push(format!("...and {} more notifications", notifs.len() - 3));
+                summary
+            } else {
+                notifs
+            };
+            agent_state.pending_notifications = consolidated;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook fire-and-forget
+// ---------------------------------------------------------------------------
+
+fn fire_webhook_if_needed(config: &SimConfig, event_type: &str, payload: &serde_json::Value) {
+    if !config.webhooks.enabled {
+        return;
+    }
+    let Some(url) = &config.webhooks.url else { return };
+    if !config.webhooks.events.is_empty() && !config.webhooks.events.iter().any(|e| e == event_type) {
+        return;
+    }
+    let url = url.clone();
+    let body = serde_json::json!({
+        "event": event_type,
+        "data": payload,
+    });
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        if let Err(e) = client.post(&url).json(&body).send().await {
+            tracing::warn!("Webhook POST to {url} failed: {e}");
+        }
+    });
 }

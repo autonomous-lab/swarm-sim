@@ -63,11 +63,14 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/dashboard", get(get_dashboard))
         .route("/api/solutions", get(get_solutions))
         .route("/api/syntheses", get(get_syntheses))
+        .route("/api/sentiment-timeline", get(get_sentiment_timeline))
         .route("/api/simulation/pause", post(pause_simulation))
         .route("/api/simulation/resume", post(resume_simulation))
         .route("/api/simulation/stop", post(stop_simulation))
         .route("/api/simulation/launch", post(launch_simulation))
         .route("/api/simulation/continue", post(continue_simulation))
+        .route("/api/simulation/save", post(save_state))
+        .route("/api/simulation/load", post(load_state))
         .route("/api/god-eye/inject", post(inject_event))
         // WebSocket
         .route("/ws", get(ws_handler))
@@ -446,6 +449,15 @@ async fn get_solutions(State(state): State<AppState>) -> impl IntoResponse {
         .iter()
         .filter_map(|id| s.world.posts.get(id))
         .map(|p| {
+            let votes = s.world.solution_votes.get(&p.id).map(|v| v.len()).unwrap_or(0);
+            let refines_of = p.refines.map(|r| r.to_string());
+            // Find refinements of this solution
+            let refinements: Vec<String> = s.world.solution_ids.iter()
+                .filter_map(|sid| {
+                    let sp = s.world.posts.get(sid)?;
+                    if sp.refines == Some(p.id) { Some(sid.to_string()) } else { None }
+                })
+                .collect();
             serde_json::json!({
                 "id": p.id,
                 "author_name": p.author_name,
@@ -455,21 +467,68 @@ async fn get_solutions(State(state): State<AppState>) -> impl IntoResponse {
                 "replies": p.replies.len(),
                 "reposts": p.reposts.len(),
                 "engagement": p.engagement_score(),
+                "votes": votes,
+                "refines_of": refines_of,
+                "refinements": refinements,
             })
         })
         .collect();
     solutions.sort_by(|a, b| {
-        b["engagement"]
-            .as_f64()
-            .unwrap_or(0.0)
-            .partial_cmp(&a["engagement"].as_f64().unwrap_or(0.0))
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let a_score = a["votes"].as_u64().unwrap_or(0) as f64 * 10.0 + a["engagement"].as_f64().unwrap_or(0.0);
+        let b_score = b["votes"].as_u64().unwrap_or(0) as f64 * 10.0 + b["engagement"].as_f64().unwrap_or(0.0);
+        b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
     });
     let challenge = s.config.simulation.challenge_question.clone();
     Json(serde_json::json!({
         "challenge_question": challenge,
         "solutions": solutions,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Sentiment timeline endpoint
+// ---------------------------------------------------------------------------
+
+async fn get_sentiment_timeline(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+
+    // Build per-round average sentiment by stance
+    let max_round = s.world.current_round;
+    let mut timeline: Vec<serde_json::Value> = Vec::new();
+
+    for round in 1..=max_round {
+        let mut supportive_sum = 0.0f32;
+        let mut supportive_count = 0u32;
+        let mut opposing_sum = 0.0f32;
+        let mut opposing_count = 0u32;
+        let mut neutral_sum = 0.0f32;
+        let mut neutral_count = 0u32;
+
+        for (agent_id, agent_state) in &s.agent_states {
+            let stance = s.agents.get(agent_id).map(|a| a.stance).unwrap_or(crate::agent::Stance::Neutral);
+            // Find the sentiment value closest to this round
+            let sentiment = agent_state.sentiment_history.iter()
+                .filter(|(r, _)| *r <= round)
+                .last()
+                .map(|(_, v)| *v)
+                .unwrap_or(agent_state.current_sentiment);
+
+            match stance {
+                crate::agent::Stance::Supportive => { supportive_sum += sentiment; supportive_count += 1; }
+                crate::agent::Stance::Opposing => { opposing_sum += sentiment; opposing_count += 1; }
+                _ => { neutral_sum += sentiment; neutral_count += 1; }
+            }
+        }
+
+        timeline.push(serde_json::json!({
+            "round": round,
+            "supportive": if supportive_count > 0 { supportive_sum / supportive_count as f32 } else { 0.0 },
+            "opposing": if opposing_count > 0 { opposing_sum / opposing_count as f32 } else { 0.0 },
+            "neutral": if neutral_count > 0 { neutral_sum / neutral_count as f32 } else { 0.0 },
+        }));
+    }
+
+    Json(timeline)
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +760,62 @@ async fn inject_event(
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "Failed to inject event"})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Save / Load state
+// ---------------------------------------------------------------------------
+
+async fn save_state(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let save_path = s.config.output.output_dir.join("state.json");
+    match s.save_to_file(&save_path) {
+        Ok(_) => Json(serde_json::json!({
+            "status": "saved",
+            "path": save_path.to_string_lossy(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Save failed: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+async fn load_state(State(state): State<AppState>) -> impl IntoResponse {
+    // Look for state.json in the output dir
+    let save_path = {
+        let s = state.sim_state.read().await;
+        s.config.output.output_dir.join("state.json")
+    };
+
+    if !save_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No saved state found. Run a simulation first, then save."})),
+        )
+            .into_response();
+    }
+
+    match crate::engine::SimulationState::load_from_file(&save_path) {
+        Ok(loaded) => {
+            let mut s = state.sim_state.write().await;
+            *s = loaded;
+            Json(serde_json::json!({
+                "status": "loaded",
+                "current_round": s.world.current_round,
+                "total_agents": s.agents.len(),
+                "total_posts": s.world.posts.len(),
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Load failed: {e}")})),
         )
             .into_response(),
     }

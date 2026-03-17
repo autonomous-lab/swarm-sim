@@ -84,10 +84,10 @@ function handleAction(action) {
 
   // Update stats
   stats.actions++;
-  if (action.action_type === 'create_post' || action.action_type === 'propose_solution') stats.posts++;
-  if (action.action_type === 'like') stats.likes++;
+  if (action.action_type === 'create_post' || action.action_type === 'propose_solution' || action.action_type === 'refine_solution') stats.posts++;
+  if (action.action_type === 'like' || action.action_type === 'vote_solution') stats.likes++;
   if (action.action_type === 'reply') stats.replies++;
-  if (action.action_type === 'repost') stats.reposts++;
+  if (action.action_type === 'repost' || action.action_type === 'quote_repost') stats.reposts++;
   updateStats();
 
   // Prepend to feed
@@ -118,6 +118,11 @@ function handleRoundEnd(msg) {
     tokenUsage.prompt = msg.prompt_tokens;
     tokenUsage.completion = msg.completion_tokens || 0;
     updateTokenDisplay();
+  }
+
+  // Update cost display
+  if (msg.estimated_cost !== undefined) {
+    updateCostDisplay(msg.estimated_cost);
   }
 
   if (currentTab === 'timeline') refreshTimeline();
@@ -191,6 +196,11 @@ function updateStatus(snap) {
     updateTokenDisplay();
   }
 
+  // Update cost display
+  if (snap.estimated_cost !== undefined) {
+    updateCostDisplay(snap.estimated_cost);
+  }
+
   // Show scenario banner
   if (snap.scenario_prompt) {
     const banner = document.getElementById('scenario-banner');
@@ -227,6 +237,13 @@ function updateTokenDisplay() {
   const el = document.getElementById('token-count');
   el.textContent = `${formatTokenCount(total)} tokens`;
   el.title = `Prompt: ${tokenUsage.prompt.toLocaleString()} | Completion: ${tokenUsage.completion.toLocaleString()} | Total: ${total.toLocaleString()}`;
+}
+
+function updateCostDisplay(cost) {
+  const el = document.getElementById('cost-display');
+  if (!el) return;
+  el.textContent = cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
+  el.title = `Estimated API cost: $${cost.toFixed(4)}`;
 }
 
 // ----------------------------------------------------------------
@@ -406,19 +423,40 @@ async function refreshThreads() {
     const postMap = {};
     posts.forEach(p => { postMap[p.id] = p; });
 
+    // Collect ALL replies (including nested) for each root post
+    function collectAllReplies(rootId) {
+      const result = [];
+      const queue = [rootId];
+      const visited = new Set();
+      while (queue.length > 0) {
+        const pid = queue.shift();
+        if (visited.has(pid)) continue;
+        visited.add(pid);
+        const post = postMap[pid];
+        if (!post) continue;
+        if (post.replies) {
+          post.replies.forEach(rid => {
+            if (postMap[rid]) {
+              result.push(postMap[rid]);
+              queue.push(rid);
+            }
+          });
+        }
+      }
+      return result;
+    }
+
     // Find root posts (no reply_to) that have at least 1 reply
     const threads = posts
       .filter(p => !p.reply_to && p.replies && p.replies.length > 0)
       .map(root => {
-        const replies = root.replies
-          .map(rid => postMap[rid])
-          .filter(Boolean)
-          .sort((a, b) => a.created_at_round - b.created_at_round);
-        const lastActivity = replies.length > 0
-          ? Math.max(root.created_at_round, ...replies.map(r => r.created_at_round))
+        const allReplies = collectAllReplies(root.id);
+        allReplies.sort((a, b) => a.created_at_round - b.created_at_round);
+        const lastActivity = allReplies.length > 0
+          ? Math.max(root.created_at_round, ...allReplies.map(r => r.created_at_round))
           : root.created_at_round;
-        const engagement = (root.likes ? root.likes.length : 0) + (root.replies ? root.replies.length : 0) * 2;
-        return { root, replies, lastActivity, engagement };
+        const engagement = (root.likes ? root.likes.length : 0) + allReplies.length * 2;
+        return { root, replies: allReplies, lastActivity, engagement };
       })
       .sort((a, b) => b.engagement - a.engagement || b.lastActivity - a.lastActivity);
 
@@ -427,7 +465,7 @@ async function refreshThreads() {
       return;
     }
 
-    el.innerHTML = threads.map(t => renderThread(t.root, t.replies)).join('');
+    el.innerHTML = threads.map(t => renderThread(t.root, t.replies, postMap)).join('');
   } catch (e) {
     el.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">Could not load threads</div>';
   }

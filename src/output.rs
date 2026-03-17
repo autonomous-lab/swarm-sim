@@ -131,6 +131,19 @@ pub fn print_action(action: &Action, verbose: bool) {
             let content = action.content.as_deref().unwrap_or("");
             format!("{} \"{}\"", "PIN".yellow(), content)
         }
+        ActionType::QuoteRepost => {
+            let content = action.content.as_deref().unwrap_or("");
+            let preview = if content.len() > 60 {
+                format!("{}...", &content[..57])
+            } else {
+                content.to_string()
+            };
+            let target = action
+                .target_post_id
+                .map(|id| id.to_string()[..8].to_string())
+                .unwrap_or_default();
+            format!("{} {} \"{}\"", "QUOTE".magenta().bold(), target, preview)
+        }
         ActionType::ProposeSolution => {
             let content = action.content.as_deref().unwrap_or("");
             let preview = if content.len() > 80 {
@@ -139,6 +152,22 @@ pub fn print_action(action: &Action, verbose: bool) {
                 content.to_string()
             };
             format!("{} \"{}\"", "SOLUTION".yellow().bold(), preview)
+        }
+        ActionType::VoteSolution => {
+            let target = action
+                .target_post_id
+                .map(|id| id.to_string()[..8].to_string())
+                .unwrap_or_default();
+            format!("{} {}", "VOTE".yellow(), target)
+        }
+        ActionType::RefineSolution => {
+            let content = action.content.as_deref().unwrap_or("");
+            let preview = if content.len() > 60 {
+                format!("{}...", &content[..57])
+            } else {
+                content.to_string()
+            };
+            format!("{} \"{}\"", "REFINE".yellow(), preview)
         }
     };
 
@@ -150,7 +179,7 @@ pub fn print_action(action: &Action, verbose: bool) {
 
 pub fn print_round_summary(summary: &RoundSummary) {
     println!(
-        "\n{} R{:>3} | {} agents | {} posts {} replies {} likes {} reposts {} follows",
+        "\n{} R{:>3} | {} agents | {} posts {} replies {} likes {} reposts {} QRT {} follows",
         ">>>".bright_cyan().bold(),
         summary.round,
         summary.active_agents.to_string().bright_white(),
@@ -158,6 +187,7 @@ pub fn print_round_summary(summary: &RoundSummary) {
         summary.new_replies.to_string().cyan(),
         summary.new_likes.to_string().red(),
         summary.new_reposts.to_string().magenta(),
+        summary.new_quote_reposts.to_string().magenta(),
         summary.new_follows.to_string().blue(),
     );
     if summary.events_injected > 0 {

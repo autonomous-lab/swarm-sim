@@ -17,11 +17,14 @@ pub enum ActionType {
     Reply,
     Like,
     Repost,
+    QuoteRepost,
     Follow,
     Unfollow,
     DoNothing,
     PinMemory,
     ProposeSolution,
+    VoteSolution,
+    RefineSolution,
 }
 
 impl std::fmt::Display for ActionType {
@@ -31,11 +34,14 @@ impl std::fmt::Display for ActionType {
             ActionType::Reply => write!(f, "reply"),
             ActionType::Like => write!(f, "like"),
             ActionType::Repost => write!(f, "repost"),
+            ActionType::QuoteRepost => write!(f, "quote_repost"),
             ActionType::Follow => write!(f, "follow"),
             ActionType::Unfollow => write!(f, "unfollow"),
             ActionType::DoNothing => write!(f, "do_nothing"),
             ActionType::PinMemory => write!(f, "pin_memory"),
             ActionType::ProposeSolution => write!(f, "propose_solution"),
+            ActionType::VoteSolution => write!(f, "vote_solution"),
+            ActionType::RefineSolution => write!(f, "refine_solution"),
         }
     }
 }
@@ -79,6 +85,10 @@ pub struct Post {
     pub reply_to: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repost_of: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_of: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refines: Option<Uuid>,
     pub likes: Vec<Uuid>,
     pub replies: Vec<Uuid>,
     pub reposts: Vec<Uuid>,
@@ -172,6 +182,7 @@ pub struct RoundSummary {
     pub new_replies: usize,
     pub new_likes: usize,
     pub new_reposts: usize,
+    pub new_quote_reposts: usize,
     pub new_follows: usize,
     pub events_injected: usize,
     pub new_solutions: usize,
@@ -186,7 +197,7 @@ const MAX_POSTS: usize = 50_000;
 /// When pruning, keep this many most-recent posts.
 const PRUNE_KEEP: usize = 40_000;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldState {
     pub posts: HashMap<Uuid, Post>,
     pub post_timeline: Vec<Uuid>,
@@ -196,6 +207,7 @@ pub struct WorldState {
     pub injected_events: Vec<InjectedEvent>,
     pub round_summaries: Vec<RoundSummary>,
     pub solution_ids: Vec<Uuid>,
+    pub solution_votes: HashMap<Uuid, Vec<Uuid>>,
 }
 
 impl WorldState {
@@ -209,6 +221,7 @@ impl WorldState {
             injected_events: Vec::new(),
             round_summaries: Vec::new(),
             solution_ids: Vec::new(),
+            solution_votes: HashMap::new(),
         }
     }
 

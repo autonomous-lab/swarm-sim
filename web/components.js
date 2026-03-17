@@ -45,43 +45,80 @@ function renderPostCard(action) {
     </div>`;
 }
 
-function renderThread(root, replies) {
+function renderThread(root, replies, postMap) {
   const likeCount = root.likes ? root.likes.length : 0;
-  const replyCount = replies.length;
-  const collapsed = replyCount > 3;
-  const visibleReplies = collapsed ? replies.slice(0, 2) : replies;
-  const hiddenCount = collapsed ? replyCount - 2 : 0;
+  const totalReplies = replies.length;
   const threadId = root.id.slice(0, 8);
 
-  let repliesHtml = visibleReplies.map(r => {
+  // Build nested reply tree
+  function buildReplyTree(parentId, depth) {
+    const children = replies.filter(r => r.reply_to === parentId);
+    if (children.length === 0) return '';
+    const maxDepth = 3;
+    let html = '';
+    children.forEach(r => {
+      const time = r.simulated_time ? new Date(r.simulated_time).toLocaleTimeString() : '';
+      const depthIndicator = depth > 0 ? `<span class="thread-depth-indicator">${'&#8627;'.repeat(Math.min(depth, 3))}</span>` : '';
+      const childReplies = depth < maxDepth ? buildReplyTree(r.id, depth + 1) : '';
+      const deepChildren = depth >= maxDepth ? replies.filter(c => c.reply_to === r.id) : [];
+      const deepCollapse = deepChildren.length > 0
+        ? `<button class="thread-collapse-btn" onclick="expandDeepThread(this, '${r.id.slice(0, 8)}')">${deepChildren.length} more nested repl${deepChildren.length !== 1 ? 'ies' : 'y'}</button>`
+        : '';
+      html += `
+        <div class="thread-reply${depth > 0 ? ' thread-nested' : ''}">
+          <div class="thread-reply-header">
+            ${depthIndicator}
+            <span class="post-author">@${esc(r.author_name)}</span>
+            <span class="post-time">R${r.created_at_round} ${time}</span>
+          </div>
+          <div class="thread-reply-content">${esc(r.content)}</div>
+          ${childReplies}${deepCollapse}
+        </div>`;
+    });
+    return html;
+  }
+
+  // Direct replies to root (reply_to === root.id)
+  const directReplies = replies.filter(r => r.reply_to === root.id);
+  const nestedReplies = replies.filter(r => r.reply_to !== root.id);
+
+  let repliesHtml = '';
+  const collapsed = directReplies.length > 4;
+  const visibleDirect = collapsed ? directReplies.slice(0, 3) : directReplies;
+
+  visibleDirect.forEach(r => {
     const time = r.simulated_time ? new Date(r.simulated_time).toLocaleTimeString() : '';
-    return `
+    const childReplies = buildReplyTree(r.id, 1);
+    repliesHtml += `
       <div class="thread-reply">
         <div class="thread-reply-header">
           <span class="post-author">@${esc(r.author_name)}</span>
           <span class="post-time">R${r.created_at_round} ${time}</span>
         </div>
         <div class="thread-reply-content">${esc(r.content)}</div>
+        ${childReplies}
       </div>`;
-  }).join('');
+  });
 
   if (collapsed) {
+    const hiddenCount = directReplies.length - 3;
     repliesHtml += `
       <button class="thread-toggle" onclick="expandThread(this, '${threadId}')">
         Show ${hiddenCount} more ${hiddenCount === 1 ? 'reply' : 'replies'}
       </button>`;
-    const hiddenReplies = replies.slice(2).map(r => {
+    directReplies.slice(3).forEach(r => {
       const time = r.simulated_time ? new Date(r.simulated_time).toLocaleTimeString() : '';
-      return `
+      const childReplies = buildReplyTree(r.id, 1);
+      repliesHtml += `
         <div class="thread-reply thread-hidden" data-thread="${threadId}">
           <div class="thread-reply-header">
             <span class="post-author">@${esc(r.author_name)}</span>
             <span class="post-time">R${r.created_at_round} ${time}</span>
           </div>
           <div class="thread-reply-content">${esc(r.content)}</div>
+          ${childReplies}
         </div>`;
-    }).join('');
-    repliesHtml += hiddenReplies;
+    });
   }
 
   const time = root.simulated_time ? new Date(root.simulated_time).toLocaleTimeString() : '';
@@ -97,7 +134,7 @@ function renderThread(root, replies) {
         <div class="post-content">${esc(root.content)}</div>
         <div class="thread-engagement">
           <span class="thread-stat">${likeCount} like${likeCount !== 1 ? 's' : ''}</span>
-          <span class="thread-stat">${replyCount} repl${replyCount !== 1 ? 'ies' : 'y'}</span>
+          <span class="thread-stat">${totalReplies} repl${totalReplies !== 1 ? 'ies' : 'y'}</span>
         </div>
       </div>
       <div class="thread-replies">
@@ -109,6 +146,11 @@ function renderThread(root, replies) {
 function expandThread(btn, threadId) {
   const hidden = btn.parentElement.querySelectorAll(`.thread-hidden[data-thread="${threadId}"]`);
   hidden.forEach(el => el.classList.remove('thread-hidden'));
+  btn.remove();
+}
+
+function expandDeepThread(btn, postId) {
+  // Deep thread expand placeholder — would require re-fetch, just remove button for now
   btn.remove();
 }
 
@@ -159,12 +201,15 @@ function renderAgentDetail(data) {
   const tierLabel = { tier1: 'VIP', tier2: 'Standard', tier3: 'Figurant' }[profile.tier] || '';
   const stanceDot = getStanceDot(profile.stance);
   const stanceClass = profile.stance || 'neutral';
+  const archetypeBadge = profile.archetype
+    ? `<span class="archetype-badge">${esc(profile.archetype.replace(/_/g, ' '))}</span>`
+    : '';
 
   // Profile section
   let profileHtml = `
     <div class="agent-detail-header">
       <div class="agent-detail-name">${esc(profile.name)}</div>
-      <div class="agent-detail-username">@${esc(profile.username)} &middot; ${tierLabel}</div>
+      <div class="agent-detail-username">@${esc(profile.username)} &middot; ${tierLabel} ${archetypeBadge}</div>
     </div>
     <div class="agent-detail-section">
       <p>${esc(profile.bio)}</p>
@@ -204,12 +249,19 @@ function renderAgentDetail(data) {
     </div>`;
   }
 
-  // Tabs: Activity, Memory, Posts
+  // Sentiment sparkline
+  let sparklineHtml = '';
+  if (state && state.sentiment_history && state.sentiment_history.length > 1) {
+    sparklineHtml = renderAgentSparkline(state.sentiment_history);
+  }
+
+  // Tabs: Activity, Memory, Posts, Relationships
   let tabsHtml = `
     <div class="detail-tabs">
       <button class="detail-tab active" onclick="switchDetailTab(this,'activity')">Activity</button>
       <button class="detail-tab" onclick="switchDetailTab(this,'memory')">Memory</button>
       <button class="detail-tab" onclick="switchDetailTab(this,'posts')">Posts</button>
+      <button class="detail-tab" onclick="switchDetailTab(this,'relationships')">Relations</button>
     </div>`;
 
   // Activity tab (action_log)
@@ -272,7 +324,35 @@ function renderAgentDetail(data) {
   }
   postsTabHtml += '</div>';
 
-  return profileHtml + demoHtml + interestsHtml + statsHtml + tabsHtml + activityHtml + memoryHtml + postsTabHtml;
+  // Relationships tab
+  let relHtml = '<div class="detail-tab-content" data-tab="relationships">';
+  if (state && (state.followers.length > 0 || state.following.length > 0)) {
+    if (state.following.length > 0) {
+      relHtml += '<div class="memory-section-label">Following (' + state.following.length + ')</div>';
+      relHtml += state.following.slice(0, 20).map(id => {
+        const shortId = id.slice(0, 8);
+        return `<div class="relationship-item">
+          <span class="rel-direction">&#10145;</span>
+          <span class="rel-username">${shortId}</span>
+        </div>`;
+      }).join('');
+    }
+    if (state.followers.length > 0) {
+      relHtml += '<div class="memory-section-label">Followers (' + state.followers.length + ')</div>';
+      relHtml += state.followers.slice(0, 20).map(id => {
+        const shortId = id.slice(0, 8);
+        return `<div class="relationship-item">
+          <span class="rel-direction">&#11013;</span>
+          <span class="rel-username">${shortId}</span>
+        </div>`;
+      }).join('');
+    }
+  } else {
+    relHtml += '<div class="detail-empty">No relationships yet</div>';
+  }
+  relHtml += '</div>';
+
+  return profileHtml + demoHtml + interestsHtml + statsHtml + sparklineHtml + tabsHtml + activityHtml + memoryHtml + postsTabHtml + relHtml;
 }
 
 function switchDetailTab(btn, tabName) {
@@ -287,6 +367,40 @@ function renderSentimentBar(bias) {
   const pct = ((bias + 1) / 2 * 100).toFixed(0);
   const color = bias > 0.3 ? 'var(--accent-green)' : bias < -0.3 ? 'var(--accent-red)' : 'var(--accent-yellow)';
   return `<span class="sentiment-bar"><span class="sentiment-fill" style="width:${pct}%;background:${color}"></span></span> <span style="font-size:11px">${bias.toFixed(1)}</span>`;
+}
+
+function renderAgentSparkline(sentimentHistory) {
+  const W = 280;
+  const H = 50;
+  const PAD = { top: 4, right: 4, bottom: 12, left: 24 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  const rounds = sentimentHistory.map(e => e[0]);
+  const vals = sentimentHistory.map(e => e[1]);
+  const minR = Math.min(...rounds);
+  const maxR = Math.max(...rounds);
+  const xScale = (r) => PAD.left + ((r - minR) / Math.max(maxR - minR, 1)) * plotW;
+  const yScale = (v) => PAD.top + plotH - ((v + 1) / 2) * plotH;
+
+  const pathD = sentimentHistory.map((e, i) =>
+    `${i === 0 ? 'M' : 'L'}${xScale(e[0]).toFixed(1)},${yScale(e[1]).toFixed(1)}`
+  ).join(' ');
+
+  const lastVal = vals[vals.length - 1];
+  const color = lastVal > 0.2 ? '#2ecc71' : lastVal < -0.2 ? '#e74c3c' : '#f39c12';
+
+  const zeroY = yScale(0).toFixed(1);
+  return `<div class="sentiment-sparkline-container">
+    <h4>Sentiment Over Time</h4>
+    <svg width="${W}" height="${H}" style="display:block">
+      <line x1="${PAD.left}" y1="${zeroY}" x2="${W - PAD.right}" y2="${zeroY}" stroke="var(--text-muted)" stroke-width="0.5" stroke-dasharray="2,2" opacity="0.4"/>
+      <path d="${pathD}" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.9"/>
+      <text x="${PAD.left - 3}" y="${yScale(1)}" fill="var(--text-muted)" font-size="8" text-anchor="end" dominant-baseline="middle">1</text>
+      <text x="${PAD.left - 3}" y="${zeroY}" fill="var(--text-muted)" font-size="8" text-anchor="end" dominant-baseline="middle">0</text>
+      <text x="${PAD.left - 3}" y="${yScale(-1)}" fill="var(--text-muted)" font-size="8" text-anchor="end" dominant-baseline="middle">-1</text>
+    </svg>
+  </div>`;
 }
 
 function getStanceDot(stance) {
@@ -391,7 +505,86 @@ function renderDashboard(data) {
     </div>`;
   }
 
-  return metricsHtml + stanceHtml + tierHtml + sparkHtml + leaderboardHtml;
+  // Sentiment timeline placeholder (loaded async)
+  const sentimentHtml = `
+    <div class="dash-section">
+      <h3>Sentiment Timeline</h3>
+      <div id="sentiment-chart" class="sentiment-chart-container">Loading...</div>
+    </div>`;
+
+  // Trigger async sentiment chart load
+  setTimeout(loadSentimentChart, 100);
+
+  return metricsHtml + stanceHtml + tierHtml + sparkHtml + sentimentHtml + leaderboardHtml;
+}
+
+async function loadSentimentChart() {
+  const container = document.getElementById('sentiment-chart');
+  if (!container) return;
+  try {
+    const data = await fetchJson('/api/sentiment-timeline');
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:10px">No sentiment data yet</div>';
+      return;
+    }
+    renderSentimentSVG(container, data);
+  } catch (e) {
+    container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:10px">Could not load sentiment data</div>';
+  }
+}
+
+function renderSentimentSVG(container, data) {
+  const W = container.clientWidth || 500;
+  const H = 160;
+  const PAD = { top: 10, right: 10, bottom: 25, left: 35 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  const rounds = data.map(d => d.round);
+  const minR = Math.min(...rounds);
+  const maxR = Math.max(...rounds);
+  const xScale = (r) => PAD.left + ((r - minR) / Math.max(maxR - minR, 1)) * plotW;
+  const yScale = (v) => PAD.top + plotH - ((v + 1) / 2) * plotH; // -1..1 -> plotH..0
+
+  function line(data, key) {
+    return data.map((d, i) =>
+      `${i === 0 ? 'M' : 'L'}${xScale(d.round).toFixed(1)},${yScale(d[key]).toFixed(1)}`
+    ).join(' ');
+  }
+
+  const lines = [
+    { key: 'supportive', color: '#2ecc71', label: 'Supportive' },
+    { key: 'opposing', color: '#e74c3c', label: 'Opposing' },
+    { key: 'neutral', color: '#f39c12', label: 'Neutral' },
+  ];
+
+  const pathsHtml = lines.map(l =>
+    `<path d="${line(data, l.key)}" fill="none" stroke="${l.color}" stroke-width="2" opacity="0.8"/>`
+  ).join('');
+
+  // Y axis labels
+  const yLabels = [-1, -0.5, 0, 0.5, 1].map(v =>
+    `<text x="${PAD.left - 5}" y="${yScale(v)}" fill="var(--text-muted)" font-size="10" text-anchor="end" dominant-baseline="middle">${v}</text>`
+  ).join('');
+
+  // X axis labels (show every Nth round)
+  const step = Math.max(1, Math.floor(rounds.length / 8));
+  const xLabels = rounds.filter((_, i) => i % step === 0).map(r =>
+    `<text x="${xScale(r)}" y="${H - 3}" fill="var(--text-muted)" font-size="10" text-anchor="middle">R${r}</text>`
+  ).join('');
+
+  // Zero line
+  const zeroLine = `<line x1="${PAD.left}" y1="${yScale(0)}" x2="${W - PAD.right}" y2="${yScale(0)}" stroke="var(--text-muted)" stroke-width="0.5" stroke-dasharray="3,3" opacity="0.5"/>`;
+
+  // Legend
+  const legendHtml = lines.map((l, i) =>
+    `<rect x="${PAD.left + i * 90}" y="0" width="10" height="10" fill="${l.color}" rx="2"/>` +
+    `<text x="${PAD.left + i * 90 + 14}" y="9" fill="var(--text)" font-size="10">${l.label}</text>`
+  ).join('');
+
+  container.innerHTML = `<svg width="${W}" height="${H}" style="display:block">
+    ${zeroLine}${yLabels}${xLabels}${pathsHtml}${legendHtml}
+  </svg>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -410,22 +603,38 @@ function renderEventEntry(event) {
 
 function renderSolution(solution, rank) {
   const engagement = solution.engagement || 0;
+  const votes = solution.votes || 0;
+  const refinements = solution.refinements || [];
+  const refinesOf = solution.refines_of;
+
+  let refineBadge = '';
+  if (refinesOf) {
+    refineBadge = `<span class="action-badge refine">REFINEMENT</span>`;
+  }
+  let refinementsInfo = '';
+  if (refinements.length > 0) {
+    refinementsInfo = `<div class="solution-refinements">${refinements.length} refinement${refinements.length !== 1 ? 's' : ''}</div>`;
+  }
+
   return `
-    <div class="solution-card">
+    <div class="solution-card${refinesOf ? ' solution-refinement' : ''}">
       <div class="solution-rank">#${rank}</div>
       <div class="solution-body">
         <div class="solution-header">
           <span class="post-author">@${esc(solution.author_name)}</span>
           <span class="action-badge solution">SOLUTION</span>
+          ${refineBadge}
           <span class="post-time">R${solution.created_at_round}</span>
         </div>
         <div class="solution-content">${esc(solution.content)}</div>
         <div class="solution-stats">
+          ${votes > 0 ? `<span class="solution-stat solution-votes">${votes} vote${votes !== 1 ? 's' : ''}</span>` : ''}
           <span class="solution-stat">${solution.likes || 0} likes</span>
           <span class="solution-stat">${solution.replies || 0} replies</span>
           <span class="solution-stat">${solution.reposts || 0} reposts</span>
           <span class="solution-engagement">${engagement.toFixed(0)} engagement</span>
         </div>
+        ${refinementsInfo}
       </div>
     </div>`;
 }
@@ -436,9 +645,12 @@ function getActionBadge(actionType) {
     reply: '<span class="action-badge reply">REPLY</span>',
     like: '<span class="action-badge like">LIKE</span>',
     repost: '<span class="action-badge repost">REPOST</span>',
+    quote_repost: '<span class="action-badge quote">QUOTE</span>',
     follow: '<span class="action-badge follow">FOLLOW</span>',
     pin_memory: '<span class="action-badge pin">PIN</span>',
     propose_solution: '<span class="action-badge solution">SOLUTION</span>',
+    vote_solution: '<span class="action-badge vote">VOTE</span>',
+    refine_solution: '<span class="action-badge refine">REFINE</span>',
   };
   return map[actionType] || '';
 }
