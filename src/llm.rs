@@ -355,19 +355,80 @@ pub fn parse_single_response(raw: &str) -> Option<SingleAgentResponse> {
 
 /// Parse a batch LLM response with multi-layer fallback.
 pub fn parse_batch_response(raw: &str) -> Option<BatchAgentResponse> {
+    // Layer 1: strict JSON
     if let Ok(r) = serde_json::from_str::<BatchAgentResponse>(raw) {
         return Some(r);
     }
+    // Layer 2: extract from markdown code block
     if let Some(json_str) = extract_json_block(raw) {
         if let Ok(r) = serde_json::from_str::<BatchAgentResponse>(&json_str) {
             return Some(r);
         }
     }
+    // Layer 3: fix truncated JSON
     let fixed = fix_truncated_json(raw);
     if let Ok(r) = serde_json::from_str::<BatchAgentResponse>(&fixed) {
         return Some(r);
     }
+    // Layer 4: try to salvage individual agent entries from partial response
+    if let Some(salvaged) = salvage_partial_batch(raw) {
+        return Some(salvaged);
+    }
     None
+}
+
+/// Attempt to salvage individual agent actions from a partially valid batch response.
+/// This handles cases where the LLM produced valid entries for some agents but truncated for others.
+fn salvage_partial_batch(raw: &str) -> Option<BatchAgentResponse> {
+    // Find all "agent_id" entries and try to parse each one individually
+    let mut entries = Vec::new();
+    let search = raw;
+
+    // Look for pattern: {"agent_id":"...", ... }
+    let mut pos = 0;
+    while let Some(start) = search[pos..].find("\"agent_id\"") {
+        let abs_start = pos + start;
+        // Walk back to find the opening brace
+        let obj_start = search[..abs_start].rfind('{').unwrap_or(abs_start);
+        // Find matching closing brace
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escape = false;
+        let mut obj_end = None;
+        for (i, ch) in search[obj_start..].char_indices() {
+            if escape { escape = false; continue; }
+            match ch {
+                '\\' if in_str => escape = true,
+                '"' => in_str = !in_str,
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        obj_end = Some(obj_start + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(end) = obj_end {
+            let fragment = &search[obj_start..end];
+            if let Ok(entry) = serde_json::from_str::<AgentActionEntry>(fragment) {
+                entries.push(entry);
+            }
+            pos = end;
+        } else {
+            pos = abs_start + 10;
+        }
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        tracing::info!("Salvaged {} agent entries from partial batch response", entries.len());
+        Some(BatchAgentResponse { agent_actions: entries })
+    }
 }
 
 /// Extract JSON from markdown code blocks.
@@ -441,21 +502,40 @@ fn fix_truncated_json(s: &str) -> String {
 // Prompt builders
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+pub struct BatchAgentContext {
+    pub agent: AgentProfile,
+    pub memory_short: String,
+    pub sentiment: f32,
+    pub own_posts: Vec<String>,
+    pub notifications: Vec<String>,
+    pub feed_posts: Vec<PostSummary>,
+    pub trending_posts: Vec<PostSummary>,
+    pub reply_candidates: Vec<ReplyCandidate>,
+    pub fatigue: f32,
+    pub relations_short: String,
+    pub beliefs_short: String,
+}
+
 /// Build the system prompt for a single (Tier 1) agent.
 pub fn build_single_system_prompt(agent: &AgentProfile, current_sentiment: f32, challenge_question: Option<&str>) -> String {
     let (behavior, _action_mix, style) = agent.archetype.prompt_instructions();
     let runtime_stance = Stance::from_sentiment(current_sentiment);
     let max_len = agent.archetype.max_post_length();
+    let demographic = agent.demographic_style();
+    let age_label = agent.age.map(|a| format!(", age {a}")).unwrap_or_default();
+    let prof_label = agent.profession.as_deref().map(|p| format!(", {p}")).unwrap_or_default();
+    let country_label = agent.country.as_deref().map(|c| format!(", from {c}")).unwrap_or_default();
 
     format!(
         r#"You simulate ONE social media user. Write EXACTLY like a real person on Twitter/X — not like an AI.
 
-IDENTITY: @{username} ({name}) | {stance} | sentiment:{sentiment:.1}
+IDENTITY: @{username} ({name}{age}{prof}{country}) | {stance} | sentiment:{sentiment:.1}
 Bio: {bio}
 
 VOICE: {behavior}
 STYLE: {style}
-HARD LIMIT: {max_len} characters per post. Posts exceeding this are INVALID.
+{demographic_section}HARD LIMIT: {max_len} characters per post. Posts exceeding this are INVALID.
 
 RULES:
 - Write like this person would ACTUALLY tweet. No corporate speak. No essay structure.
@@ -467,8 +547,10 @@ RULES:
 - You may take 0-3 actions.
 - NO hashtags (unless you are an activist, then max 1). Real people rarely use hashtags.
 - Use contractions (don't, can't, it's). Use lowercase when casual. Real tweets are messy.
+- VARY your format: sometimes ask a question, sometimes quote-repost with commentary, sometimes just react with 2 words. NOT every post needs to be a statement.
 - BANNED PHRASES (never use): "raises questions", "remains to be seen", "data-driven", "innovative",
-  "game-changer", "implications", "landscape", "paradigm", "noteworthy", "unprecedented", "leveraging"
+  "game-changer", "implications", "landscape", "paradigm", "noteworthy", "unprecedented", "leveraging",
+  "it's worth noting", "at the end of the day", "moving forward", "in terms of", "to be fair"
 
 ACTIONS:
 - create_post: "content" field
@@ -486,9 +568,13 @@ JSON ONLY (pin_memory is optional — only include if you want to remember somet
 }}"#,
         username = agent.username,
         name = agent.name,
+        age = age_label,
+        prof = prof_label,
+        country = country_label,
         bio = agent.bio,
         stance = runtime_stance,
         sentiment = current_sentiment,
+        demographic_section = if demographic.is_empty() { String::new() } else { format!("DEMOGRAPHIC VOICE: {demographic}\n") },
         challenge_actions = if challenge_question.is_some() {
             "\n- propose_solution: \"content\" (propose a concrete solution to the challenge question)\n- vote_solution: \"target_post_id\" (vote for a solution you support)\n- refine_solution: \"target_post_id\" + \"content\" (improve an existing solution)"
         } else {
@@ -510,12 +596,37 @@ pub fn build_single_user_prompt(
     challenge_question: Option<&str>,
     own_recent_posts: &[String],
     notifications: &[String],
+    fatigue: f32,
+    relations_text: &str,
+    beliefs_text: &str,
 ) -> String {
     let mut parts = Vec::new();
 
     parts.push(format!(
         "ROUND {round}/{total_rounds} | Time: {simulated_time}"
     ));
+
+    // Cognitive state: fatigue affects behavior
+    if fatigue > 0.3 {
+        let energy_desc = if fatigue > 0.7 {
+            "EXHAUSTED — you've been posting a lot. Consider just scrolling, liking, or taking a break (do_nothing)."
+        } else if fatigue > 0.5 {
+            "TIRED — you're running low on energy. Keep it short, maybe just like or repost."
+        } else {
+            "SLIGHTLY TIRED — you've been active. Don't overthink your next post."
+        };
+        parts.push(format!("\nENERGY: {energy_desc} (fatigue: {fatigue:.1})"));
+    }
+
+    // Relational context
+    if !relations_text.is_empty() {
+        parts.push(format!("\n{relations_text}"));
+    }
+
+    // Beliefs context: your evolving opinions on key topics
+    if !beliefs_text.is_empty() {
+        parts.push(format!("\n{beliefs_text}"));
+    }
 
     if !notifications.is_empty() {
         parts.push("\nNOTIFICATIONS (what happened since last round):".into());
@@ -543,14 +654,16 @@ pub fn build_single_user_prompt(
             } else {
                 String::new()
             };
+            let contested_tag = if p.contested { " [CONTESTED]" } else { "" };
             parts.push(format!(
-                "  [{id}] @{author}{thread}: {content}\n    Likes:{likes} Replies:{replies} | {age}r ago",
+                "  [{id}] @{author}{thread}: {content}\n    Likes:{likes} Replies:{replies}{contested} | {age}r ago",
                 id = p.short_id,
                 author = p.author,
                 thread = thread_prefix,
                 content = p.content_preview,
                 likes = p.likes,
                 replies = p.replies,
+                contested = contested_tag,
                 age = p.rounds_ago,
             ));
         }
@@ -601,34 +714,85 @@ pub fn build_single_user_prompt(
 
 /// Build the system prompt for a batch of agents (Tier 2/3).
 pub fn build_batch_system_prompt(
-    agents: &[(AgentProfile, String, f32, Vec<String>, Vec<String>)],
+    agents: &[BatchAgentContext],
     persona_max_chars: usize,
     challenge_question: Option<&str>,
 ) -> String {
     let mut agent_descs = String::new();
-    for (agent, memory_short, sentiment, own_posts, notifs) in agents {
+    for ctx in agents {
+        let agent = &ctx.agent;
         let (_behavior, _action_mix, style) = agent.archetype.prompt_instructions();
-        let runtime_stance = Stance::from_sentiment(*sentiment);
+        let runtime_stance = Stance::from_sentiment(ctx.sentiment);
+        let fatigue_tag = if ctx.fatigue > 0.7 { " [EXHAUSTED]" }
+            else if ctx.fatigue > 0.4 { " [tired]" }
+            else { "" };
+        let age_label = agent.age.map(|a| format!(", {a}yo")).unwrap_or_default();
+        let prof_label = agent.profession.as_deref().map(|p| format!(", {p}")).unwrap_or_default();
+        let demographic = agent.demographic_style();
+        let demo_line = if demographic.is_empty() { String::new() } else { format!("Voice: {demographic}\n") };
         agent_descs.push_str(&format!(
-            "---\n[{id}] @{username} | {stance} | {archetype}\n{persona}\nSTYLE: {style}\nMemory: {memory}\n",
+            "---\n[{id}] @{username}{age}{prof} | {stance} | {archetype}{fatigue}\n{persona}\nSTYLE: {style}\n{demo}Memory: {memory}\n",
             id = &agent.id.to_string()[..8],
             username = agent.username,
+            age = age_label,
+            prof = prof_label,
             persona = agent.persona_truncated(persona_max_chars),
             stance = runtime_stance,
             archetype = agent.archetype,
-            memory = memory_short,
+            fatigue = fatigue_tag,
+            demo = demo_line,
+            memory = ctx.memory_short,
         ));
-        if !own_posts.is_empty() {
+        if !ctx.relations_short.is_empty() {
+            agent_descs.push_str(&format!("{}\n", ctx.relations_short));
+        }
+        if !ctx.beliefs_short.is_empty() {
+            agent_descs.push_str(&format!("{}\n", ctx.beliefs_short));
+        }
+        if !ctx.own_posts.is_empty() {
             agent_descs.push_str("Already posted (DON'T repeat): ");
-            for p in own_posts.iter().take(3) {
+            for p in ctx.own_posts.iter().take(3) {
                 agent_descs.push_str(&format!("\"{}\" | ", p));
             }
             agent_descs.push('\n');
         }
-        if !notifs.is_empty() {
+        if !ctx.notifications.is_empty() {
             agent_descs.push_str("Notifications: ");
-            for n in notifs.iter().take(3) {
+            for n in ctx.notifications.iter().take(3) {
                 agent_descs.push_str(&format!("{} | ", n));
+            }
+            agent_descs.push('\n');
+        }
+        if !ctx.feed_posts.is_empty() {
+            agent_descs.push_str("Local feed: ");
+            for p in ctx.feed_posts.iter().take(5) {
+                agent_descs.push_str(&format!(
+                    "[{}] @{}: {} | ",
+                    p.short_id, p.author, p.content_preview
+                ));
+            }
+            agent_descs.push('\n');
+        }
+        if !ctx.trending_posts.is_empty() {
+            agent_descs.push_str("Trending: ");
+            for p in ctx.trending_posts.iter().take(3) {
+                agent_descs.push_str(&format!(
+                    "[{}] @{}: {} | ",
+                    p.short_id, p.author, p.content_preview
+                ));
+            }
+            agent_descs.push('\n');
+        }
+        if !ctx.reply_candidates.is_empty() {
+            agent_descs.push_str("Reply targets: ");
+            for rc in ctx.reply_candidates.iter().take(4) {
+                agent_descs.push_str(&format!(
+                    "[{}] @{} ({:.0}) {} | ",
+                    &rc.post_id.to_string()[..8],
+                    rc.author_name,
+                    rc.engagement,
+                    rc.reason
+                ));
             }
             agent_descs.push('\n');
         }
@@ -638,6 +802,8 @@ pub fn build_batch_system_prompt(
         r#"Simulate {n} Twitter/X users. Each has a DIFFERENT voice. This is NOT an essay contest — it's messy, emotional, raw Twitter.
 
 These people are LIVING through this event RIGHT NOW. They are not commentators analyzing from the outside. They are personally affected, scared, angry, amused, confused, or opportunistic.
+
+IMPORTANT: Each agent below has its own LOCAL feed and reply targets. Do not assume everyone sees the same posts.
 
 STYLE RULES:
 - Lurkers: SILENT. You MUST only use "like" or "repost". You are NOT ALLOWED to create_post or write replies longer than 3 words. If you reply, use max 3 words like "lol", "this", "fr fr". One action MAX.
@@ -675,7 +841,8 @@ CRITICAL — UNIQUENESS RULES (violations will be rejected):
 2. BANNED PHRASES — do NOT use these overused LLM clichés in ANY post:
    "raises questions", "remains to be seen", "data-driven", "innovative", "game-changer",
    "implications", "landscape", "paradigm", "noteworthy", "significant", "robust",
-   "leveraging", "ecosystem", "stakeholders", "framework", "unprecedented"
+   "leveraging", "ecosystem", "stakeholders", "framework", "unprecedented",
+   "it's worth noting", "at the end of the day", "moving forward", "in terms of", "to be fair"
 3. Each user must pick a DIFFERENT angle: personal story, joke, complaint, conspiracy theory, practical concern, emotional outburst, comparison, question, disbelief, acceptance, etc.
 4. If a user is a Lurker or Normie, they should NOT write like an analyst. "lol what" is better than a paragraph.
 
@@ -699,8 +866,6 @@ pub fn build_batch_user_prompt(
     round: u32,
     total_rounds: u32,
     simulated_time: &str,
-    feed_posts: &[PostSummary],
-    trending_posts: &[PostSummary],
     prior_tier_actions: &[String],
     events: &[String],
     challenge_question: Option<&str>,
@@ -711,44 +876,10 @@ pub fn build_batch_user_prompt(
         "ROUND {round}/{total_rounds} | Time: {simulated_time}"
     ));
 
-    if !feed_posts.is_empty() {
-        parts.push("\nSHARED FEED (top posts — you can reply to any of these, including replies):".into());
-        for p in feed_posts.iter().take(10) {
-            let thread_prefix = if let Some(ref parent) = p.reply_to_author {
-                format!(" [replying to @{}]", parent)
-            } else {
-                String::new()
-            };
-            parts.push(format!(
-                "  [{id}] @{author}{thread}: {content} (L:{likes} R:{replies})",
-                id = p.short_id,
-                author = p.author,
-                thread = thread_prefix,
-                content = p.content_preview,
-                likes = p.likes,
-                replies = p.replies,
-            ));
-        }
-    }
-
     if !prior_tier_actions.is_empty() {
         parts.push("\nRECENT ACTIVITY FROM KEY FIGURES:".into());
         for a in prior_tier_actions.iter().take(15) {
             parts.push(format!("  {a}"));
-        }
-    }
-
-    if !trending_posts.is_empty() {
-        parts.push("\nTRENDING:".into());
-        for (i, p) in trending_posts.iter().take(5).enumerate() {
-            parts.push(format!(
-                "  #{} [{id}] @{}: {} (eng:{:.0})",
-                i + 1,
-                p.author,
-                p.content_preview,
-                p.engagement,
-                id = p.short_id,
-            ));
         }
     }
 
@@ -781,6 +912,8 @@ pub struct PostSummary {
     pub rounds_ago: u32,
     pub engagement: f64,
     pub reply_to_author: Option<String>,
+    #[serde(default)]
+    pub contested: bool,
 }
 
 impl PostSummary {
@@ -800,6 +933,7 @@ impl PostSummary {
             rounds_ago: current_round.saturating_sub(post.created_at_round),
             engagement: post.engagement_score(),
             reply_to_author: None,
+            contested: post.is_contested(),
         }
     }
 }

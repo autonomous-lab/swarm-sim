@@ -312,6 +312,8 @@ JSON format:
             age: None,
             profession: Some(s.role.clone()),
             source_entity: None,
+            country: None,
+            language_style: "casual".to_string(),
             archetype,
         });
     }
@@ -350,6 +352,8 @@ JSON format:
                         age: None,
                         profession: None,
                         source_entity: None,
+            country: None,
+            language_style: "casual".to_string(),
                         archetype: assign_figurant_archetype(),
                     });
                 }
@@ -487,6 +491,8 @@ fn generate_default_agents(scenario: &str) -> Vec<AgentProfile> {
             age: None,
             profession: Some(bio.to_string()),
             source_entity: None,
+            country: None,
+            language_style: "casual".to_string(),
             archetype: *archetype,
         })
         .collect();
@@ -526,6 +532,8 @@ fn generate_default_agents(scenario: &str) -> Vec<AgentProfile> {
             age: None,
             profession: None,
             source_entity: None,
+            country: None,
+            language_style: "casual".to_string(),
             archetype: assign_figurant_archetype(),
         });
 
@@ -560,6 +568,8 @@ fn generate_default_agents(scenario: &str) -> Vec<AgentProfile> {
             age: None,
             profession: None,
             source_entity: None,
+            country: None,
+            language_style: "casual".to_string(),
             archetype: assign_figurant_archetype(),
         });
     }

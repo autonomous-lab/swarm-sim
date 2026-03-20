@@ -4,6 +4,7 @@ mod engine;
 mod god_eye;
 mod launcher;
 mod llm;
+mod metrics;
 mod output;
 mod parser;
 mod report;

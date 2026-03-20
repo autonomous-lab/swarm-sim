@@ -121,6 +121,47 @@ pub async fn generate_report(
         .map(|q| format!("\nCHALLENGE QUESTION: {q}"))
         .unwrap_or_default();
 
+    // Compute metrics for the report
+    let metrics = crate::metrics::compute_metrics(state);
+
+    let metrics_section = format!(
+        "\nKEY METRICS:\n\
+         - Polarization index: {pol:.2} (0=consensus, 1=divided)\n\
+         - Sentiment drift: {drift:.2}\n\
+         - Stance switches: {switches}\n\
+         - Viral posts: {viral}\n\
+         - Cascade count: {cascades}\n\
+         - Engagement Gini: {gini:.2} (0=equal, 1=concentrated)\n\
+         - Top 10% engagement share: {top10:.0}%\n\
+         - Echo chamber score: {echo:.2} (0=diverse, 1=echo)\n\
+         - Cross-stance interactions: {cross}\n\
+         - Contested posts: {contested}\n\
+         - Average fatigue: {fatigue:.2}\n\
+         - Average belief strength: {belief:.2}",
+        pol = metrics.polarization.polarization_index,
+        drift = metrics.polarization.average_sentiment_drift,
+        switches = metrics.polarization.stance_switches,
+        viral = metrics.virality.viral_post_count,
+        cascades = metrics.virality.cascade_count,
+        gini = metrics.influence.engagement_gini,
+        top10 = metrics.influence.top_10_pct_share * 100.0,
+        echo = metrics.community.echo_chamber_score,
+        cross = metrics.community.cross_stance_interactions,
+        contested = metrics.content.contested_count,
+        fatigue = metrics.cognitive.avg_fatigue,
+        belief = metrics.cognitive.avg_belief_strength,
+    );
+
+    let controversial = if !metrics.cognitive.controversial_topics.is_empty() {
+        let topics: Vec<String> = metrics.cognitive.controversial_topics.iter()
+            .take(5)
+            .map(|(t, v)| format!("  - {}: variance {:.2}", t, v))
+            .collect();
+        format!("\nMOST CONTROVERSIAL TOPICS:\n{}", topics.join("\n"))
+    } else {
+        String::new()
+    };
+
     let scenario = &state.config.simulation.scenario_prompt;
 
     let prompt = format!(
@@ -142,6 +183,7 @@ VIP AGENTS (TIER 1):
 
 ROUND TRAJECTORY:
 {round_trajectory}
+{metrics_section}{controversial}
 {solutions_section}
 
 Generate a comprehensive report with these sections:
@@ -149,14 +191,17 @@ Generate a comprehensive report with these sections:
 2. Timeline of Key Events (major shifts and inflection points)
 3. Agent Analysis (VIP behavior, most active, sentiment distribution)
 4. Viral Content Analysis (top posts, cascade patterns)
-5. Network Dynamics (opinion leaders, echo chambers){solutions_report_section}
-6. Methodology Notes (tiers used, models, limitations)"#,
+5. Network Dynamics (opinion leaders, echo chambers, cross-stance engagement)
+6. Quantitative Analysis (use the KEY METRICS above: polarization index, Gini, echo chamber score, cascade analysis){solutions_report_section}
+7. Methodology Notes (tiers used, models, limitations)"#,
         t1 = tier_counts.0,
         t2 = tier_counts.1,
         t3 = tier_counts.2,
         top_posts = top_posts.join("\n"),
         vip_agents = vip_agents.join("\n"),
         round_trajectory = round_data.join("\n"),
+        metrics_section = metrics_section,
+        controversial = controversial,
         solutions_section = solutions_section,
         solutions_report_section = if !state.world.solution_ids.is_empty() {
             "\n7. Top Proposed Solutions (ranked by community engagement, analysis of themes)"

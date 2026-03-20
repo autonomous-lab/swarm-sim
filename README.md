@@ -4,9 +4,9 @@
 
 # Swarm-Sim
 
-**Multi-agent social simulation engine with tiered LLM batching.**
+**Multi-agent social simulation engine with tiered LLM batching, cognitive modeling, and quantitative analytics.**
 
-Built in Rust. Async. Fast. Configurable. With a real-time web UI.
+Built in Rust. Async. Fast. Configurable. With a real-time web UI and 50+ simulation metrics.
 
 > **Why this exists:** Read the [full story](story.md) — how I reverse-engineered a $4M AI project, found it was making 7,200 API calls where 864 would do, and rebuilt it from scratch in Rust.
 
@@ -16,9 +16,11 @@ Built in Rust. Async. Fast. Configurable. With a real-time web UI.
 
 Existing multi-agent simulation frameworks (like [OASIS](https://github.com/camel-ai/oasis), used by [MiroFish](https://github.com/666ghj/MiroFish)) make **one LLM API call per agent per round**. With 100 agents running 72 rounds, that's 7,200 API calls — slow and expensive.
 
+Worse: they treat agents as stateless text generators. No fatigue, no memory of relationships, no belief evolution, no realistic information propagation. Every agent sees the same feed, every post looks the same.
+
 ## The Solution
 
-Swarm-Sim introduces **tiered batching**: agents are grouped by importance, and multiple agents are processed in a single LLM call.
+Swarm-Sim introduces **tiered batching** + **cognitive modeling** + **quantitative analytics**:
 
 | Tier | Role | Batch Size | Model | Calls (100 agents, 72 rounds) |
 |------|------|-----------|-------|-------------------------------|
@@ -41,20 +43,98 @@ VIP agents set the narrative. Standard agents react to VIPs. Figurants react to 
 
 ---
 
+## What Makes This Different
+
+### Cognitive Modeling
+Every agent has internal state that evolves over time:
+- **Fatigue** — agents get tired after consecutive active rounds, reducing their output and attention span
+- **Attention** — fatigued agents see fewer feed items, mimicking real scrolling behavior
+- **Beliefs** — per-topic conviction that shifts with exposure and trusted sources
+- **Relational memory** — trust/distrust toward other agents built through interactions (likes = trust, disagreements = distrust)
+- **Topic saturation** — repeated exposure to the same topic reduces engagement
+
+### Realistic Social Graph
+Not everyone follows the VIPs. The initial graph uses:
+- **Power-law follower distribution** — few hubs, many peripherals
+- **Community clusters** by stance — with sparse cross-community bridges
+- **Archetype-based connectivity** — Lurkers follow 1-2 people, Normies 2-4, Analysts more
+- **Isolated agents** — some accounts have zero connections (realistic)
+
+### Information Propagation
+Posts don't appear instantly to everyone:
+- **Followed authors** → immediate visibility
+- **Popular posts** (engagement > 2) → 1 round delay
+- **Unknown content** → 2 round delay (may never be seen)
+- **Contested posts** get a visibility boost (controversy drives engagement)
+- **Viral cascades** are tracked with depth and root attribution
+
+### Counter-Narratives & Fact-Checking
+- Posts receiving opposing replies are automatically marked as **contested**
+- Contested posts appear as `[CONTESTED]` in agent feeds
+- Reply candidates include "fact-check it" suggestions
+- Cascade tracking shows how misinformation (or corrections) spread
+
+### Demographic-Aware Content
+Each agent generates content matching their profile:
+- **Age-based style**: Gen Z ("fr fr", "no cap"), Millennial ("lol", "tbh"), Boomer (formal)
+- **Profession-based jargon**: engineers talk systems, journalists frame as news
+- **Cultural markers**: UK spelling, Indian patterns, LATAM warmth
+- **Format variation**: questions, thread openers, reactions, comparisons — not just statements
+
+---
+
 ## Features
 
-- **Tiered batching engine** — the core innovation, fully configurable per tier (model, batch size, concurrency, temperature, retries)
+### Core Engine
+- **Tiered batching** — fully configurable per tier (model, batch size, concurrency, temperature, retries)
+- **Cognitive state** — fatigue, attention, topic saturation per agent
+- **Belief evolution** — per-topic conviction that shifts with trust-weighted exposure
+- **Relational memory** — trust, influence, interaction history between agents
+- **Cascade tracking** — viral spread depth, root attribution, cascade statistics
+- **Contested post detection** — automatic counter-narrative identification
+- **Diffusion delay** — 3-tier visibility delay based on social distance
+- **Demographic prompting** — age, profession, country influence writing style
+- **4-layer JSON parsing** — strict → markdown extraction → truncation fix → partial salvage
+- **Weighted sentiment analysis** — 60+ words with intensity, negation detection, structural cues
+- **State validation** — 7 consistency checks after each round
+
+### Simulation Modes
+| Mode | Description |
+|------|-------------|
+| `standard` | Default simulation |
+| `crisis` | Heightened emotions, urgency, misinformation dynamics |
+| `what_if` | Test a specific intervention against a base scenario |
+| `policy` | Public opinion test for policy announcements |
+| `brand` | Brand reputation analysis — loyalty, backlash, recovery |
+| `research` | Reproducible runs with fixed seed |
+
+### Analytics (50+ Metrics)
+| Category | Key Metrics |
+|----------|-------------|
+| **Polarization** | Polarization index, sentiment drift, stance switches, per-round trend |
+| **Virality** | Cascade count, largest cascade, viral velocity, amplification ratio |
+| **Influence** | Top influencers, engagement Gini coefficient, top-10% share |
+| **Contagion** | Time-to-peak, topic persistence (first/last round, duration) |
+| **Community** | Connected components, graph density, echo chamber score, cross-stance interactions |
+| **Content** | Post/reply/repost counts, contested posts, avg length, top hashtags |
+| **Cognitive** | Average fatigue, exhausted agents, belief strength, controversial topics |
+
+### Web UI & API
 - **Real-time web UI** — dark theme SPA with live feed, agent inspector, trending, timeline
-- **God's Eye** — inject events mid-simulation via web UI or file watcher (breaking news, mood shifts, viral content)
+- **God's Eye** — inject events mid-simulation via web UI or file watcher
 - **Pause / Resume / Stop** — full simulation control from the browser
-- **Document parsing** — feed PDF, Markdown, or plain text as seed scenarios
-- **Entity extraction** — LLM automatically extracts entities from seed documents and generates agent profiles
-- **Agent memory** — rolling observation window + pinned key memories that persist across rounds
-- **Social simulation** — posts, replies, likes, reposts, follows with feed scoring (recency + popularity + relevance)
-- **JSONL action log** — every action logged with agent, tier, reasoning, timestamps
-- **Markdown report** — LLM-generated analysis of the simulation results
-- **Multi-provider LLM** — any OpenAI-compatible API (OpenAI, Anthropic proxy, DashScope, DeepSeek, Ollama...)
-- **7.9 MB binary** — single static binary, no runtime dependencies
+- **REST API** — 25+ endpoints for status, agents, posts, metrics, export
+- **WebSocket** — real-time event streaming
+- **Run comparison** — compare current vs saved simulation metrics with delta analysis
+- **JSON export** — full simulation state + metrics for external analysis
+
+### Infrastructure
+- **Document parsing** — PDF, Markdown, or plain text as seed scenarios
+- **Entity extraction** — LLM extracts stakeholders and generates agent profiles
+- **JSONL action log** — every action with agent, tier, reasoning, timestamps
+- **Markdown report** — LLM-generated analysis with quantitative metrics
+- **Multi-provider LLM** — any OpenAI-compatible API
+- **Save / Load** — full simulation state persistence with backward compatibility
 
 ---
 
@@ -86,30 +166,21 @@ Edit `config.toml` — set your API keys (via environment variables or inline):
 ```toml
 [tiers.tier1]
 batch_size = 1
-model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"
+model = "gemini-2.0-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
 
 [tiers.tier2]
 batch_size = 8
-model = "gpt-4o-mini"
-base_url = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"
+model = "gemini-2.0-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
 
 [tiers.tier3]
 batch_size = 25
-model = "qwen-plus"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = "${DASHSCOPE_API_KEY}"
-```
-
-Create a seed document (e.g. `data/news.md`) with your scenario content, and reference it in the config:
-
-```toml
-[simulation]
-total_rounds = 72
-seed_documents = ["./data/news.md"]
-scenario_prompt = "Simulate public reaction to a major tech company announcing 10,000 layoffs."
+model = "gemini-2.0-flash"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key = "${GEMINI_API_KEY}"
 ```
 
 ### Run
@@ -117,6 +188,9 @@ scenario_prompt = "Simulate public reaction to a major tech company announcing 1
 ```bash
 # Run simulation + start web UI
 swarm-sim run -c config.toml
+
+# Server mode only (launch from web UI)
+swarm-sim server -c config.toml
 
 # Open http://localhost:3000 in your browser
 ```
@@ -219,51 +293,96 @@ Events are tracked by ID — each event is injected exactly once.
 
 ---
 
-## Configuration Reference
+## Simulation Modes
 
-All parameters are configurable via `config.toml`. See [`config.example.toml`](config.example.toml) for the full schema.
+Launch with a specific mode via the API:
 
-### Simulation
+```bash
+# Standard simulation
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -H "Content-Type: application/json" \
+  -d '{"scenario_prompt": "...", "mode": "standard"}'
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `total_rounds` | 72 | Number of simulation rounds |
-| `minutes_per_round` | 60 | Simulated minutes per round |
-| `seed_documents` | — | Paths to seed documents (PDF, MD, TXT) |
-| `scenario_prompt` | — | Natural language description of the scenario |
-| `random_seed` | 0 | RNG seed (0 = system entropy) |
+# Crisis mode — heightened emotions, misinformation
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -d '{"scenario_prompt": "...", "mode": "crisis"}'
 
-### Tiers (tier1 / tier2 / tier3)
+# What-if — test a specific intervention
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -d '{"scenario_prompt": "...", "mode": "what_if", "what_if_intervention": "The company offers 6-month severance packages"}'
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `batch_size` | — | Agents per LLM call (1 = individual) |
-| `model` | — | LLM model identifier |
-| `base_url` | — | OpenAI-compatible API base URL |
-| `api_key` | — | API key (supports `${ENV_VAR}` syntax) |
-| `temperature` | 0.7 | Generation temperature |
-| `max_tokens` | 4096 | Max tokens per response |
-| `max_concurrency` | 10 | Max concurrent API calls within this tier |
-| `max_retries` | 2 | Retry count on failure |
-| `timeout_secs` | 90 | Request timeout in seconds |
+# Policy test
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -d '{"scenario_prompt": "...", "mode": "policy"}'
 
-### World
+# Brand reputation analysis
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -d '{"scenario_prompt": "...", "mode": "brand"}'
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `feed_size` | 15 | Posts per agent feed |
-| `trending_count` | 10 | Number of trending posts |
-| `recency_weight` | 0.4 | Feed scoring weight for recent posts |
-| `popularity_weight` | 0.3 | Feed scoring weight for engagement |
-| `relevance_weight` | 0.3 | Feed scoring weight for followed authors |
+# Reproducible research
+curl -X POST http://localhost:3000/api/simulation/launch \
+  -d '{"scenario_prompt": "...", "mode": "research", "research_seed": 42}'
+```
 
-### Server
+---
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `host` | 0.0.0.0 | Web server bind address |
-| `port` | 3000 | Web server port |
-| `enabled` | true | Enable/disable web UI |
+## API Reference
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| **Status & Control** | | |
+| `GET` | `/api/status` | Simulation status (round, agents, state) |
+| `POST` | `/api/simulation/launch` | Launch new simulation |
+| `POST` | `/api/simulation/continue` | Continue finished simulation for N more rounds |
+| `POST` | `/api/simulation/pause` | Pause simulation |
+| `POST` | `/api/simulation/resume` | Resume simulation |
+| `POST` | `/api/simulation/stop` | Stop + generate report |
+| `POST` | `/api/simulation/save` | Save full state to JSON |
+| `POST` | `/api/simulation/load` | Load saved state |
+| **Agents & Posts** | | |
+| `GET` | `/api/agents` | All agents (sorted by tier + followers) |
+| `GET` | `/api/agents/:id` | Agent detail (profile + cognitive state + beliefs + relations + posts) |
+| `GET` | `/api/posts` | All posts (paginated, filterable by tier) |
+| `GET` | `/api/posts/:id` | Single post with reply tree |
+| `GET` | `/api/trending` | Top posts by engagement |
+| `GET` | `/api/timeline` | Per-round summaries |
+| `GET` | `/api/graph` | Social graph (nodes + edges) |
+| `GET` | `/api/dashboard` | Dashboard stats |
+| `GET` | `/api/solutions` | Challenge mode solutions (ranked) |
+| `GET` | `/api/syntheses` | AI-generated round syntheses |
+| `GET` | `/api/sentiment-timeline` | Per-round sentiment by stance group |
+| **Metrics & Analytics** | | |
+| `GET` | `/api/metrics` | Full metrics snapshot (all 7 categories) |
+| `GET` | `/api/metrics/polarization` | Polarization index, drift, switches, trend |
+| `GET` | `/api/metrics/virality` | Cascades, viral posts, amplification ratio |
+| `GET` | `/api/metrics/influence` | Top influencers, Gini coefficient, concentration |
+| `GET` | `/api/metrics/cascades` | Detailed cascade list |
+| `GET` | `/api/metrics/contagion` | Time-to-peak, topic persistence |
+| `GET` | `/api/metrics/community` | Components, density, echo chamber score |
+| `GET` | `/api/metrics/cognitive` | Fatigue, beliefs, controversial topics |
+| `POST` | `/api/metrics/compare` | Compare current vs saved run (delta analysis) |
+| **Export & Validation** | | |
+| `GET` | `/api/validate` | State consistency check (7 validation rules) |
+| `GET` | `/api/export/json` | Full export (metadata + metrics + agents + rounds) |
+| `GET` | `/api/export/metrics` | Metrics-only export |
+| **Events** | | |
+| `POST` | `/api/god-eye/inject` | Inject event mid-simulation |
+
+### WebSocket
+
+Connect to `ws://localhost:3000/ws` for real-time events:
+
+```json
+{"type": "action",       "data": {...}}
+{"type": "round_start",  "round": 5, "active_agents": 42}
+{"type": "round_end",    "round": 5, "summary": {...}, "estimated_cost": 0.05}
+{"type": "god_eye_inject", "event": {...}}
+{"type": "trending_update", "posts": [...]}
+{"type": "synthesis",    "round": 9, "text": "..."}
+{"type": "simulation_end", "total_rounds": 72, "total_actions": 5840}
+```
 
 ---
 
@@ -277,15 +396,16 @@ swarm-sim/
 ├── src/
 │   ├── main.rs                  # CLI + orchestration
 │   ├── config.rs                # TOML config with ${ENV_VAR} resolution
-│   ├── agent.rs                 # Profiles, memory (rolling + pinned), tiers
-│   ├── world.rs                 # Posts, social graph, feed scoring, trending
-│   ├── engine.rs                # Simulation loop + tiered batching (the core)
-│   ├── llm.rs                   # Async multi-provider LLM client + prompt templates
+│   ├── agent.rs                 # Profiles, cognitive state, relational memory, beliefs
+│   ├── world.rs                 # Posts, social graph, feed scoring, cascades, diffusion delay
+│   ├── engine.rs                # Simulation loop + tiered batching + state validation
+│   ├── llm.rs                   # Async LLM client + demographic-aware prompts + 4-layer parsing
+│   ├── metrics.rs               # 50+ metrics: polarization, virality, influence, contagion, community
 │   ├── parser.rs                # PDF/MD/TXT parsing + LLM entity extraction
 │   ├── god_eye.rs               # File watcher for live event injection
-│   ├── report.rs                # Post-simulation markdown report via LLM
+│   ├── report.rs                # Post-simulation report with quantitative metrics
 │   ├── output.rs                # JSONL logger + terminal progress bars
-│   └── server.rs                # Axum REST API + WebSocket + static files
+│   └── server.rs                # Axum REST API (25+ endpoints) + WebSocket + static files
 └── web/
     ├── index.html               # SPA shell
     ├── style.css                # Dark theme
@@ -299,96 +419,27 @@ swarm-sim/
 
 2. **Semaphore-based concurrency** — each tier has its own concurrency limit to avoid overwhelming the LLM API.
 
-3. **4-layer JSON parsing** — LLM responses are parsed with fallbacks: strict JSON → extract from markdown blocks → fix truncated JSON → default to do_nothing.
+3. **4-layer JSON parsing** — LLM responses are parsed with fallbacks: strict JSON → extract from markdown blocks → fix truncated JSON → salvage individual agent entries from partial response.
 
 4. **Shared state via `Arc<RwLock>`** — the engine writes, the web server reads. No mutex contention on reads.
 
-5. **Agent memory** — two layers: a rolling window of recent observations (default 20) and pinned key memories (default 5) that the LLM can mark as important.
+5. **Cognitive agent model** — agents have fatigue, attention, relational memory (trust/influence), per-topic beliefs, and topic saturation. All state persists across rounds and affects behavior.
 
-6. **Feed scoring** — personalized per agent: `score = recency * W1 + engagement * W2 + is_followed * W3`. Weights are configurable.
+6. **Personalized feed** — each agent gets their own feed scored by `recency * W1 + engagement * W2 + is_followed * W3 + trust_boost + controversy_boost`. Posts from non-followed users have delayed visibility (1-2 rounds).
 
-7. **God's Eye dual input** — events can come from the file watcher OR from the web UI's REST API. Both feed into the same `mpsc` channel.
+7. **Weighted sentiment analysis** — 60+ words with intensity weights, negation detection, structural cues (exclamation marks, ALL CAPS, question marks). Replaces naive keyword counting.
 
----
+8. **State validation** — 7 consistency checks run after each round (verbose mode): orphan states, missing references, sentiment ranges, graph symmetry, self-follows.
 
-## API Reference
-
-### REST Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/status` | Simulation status (round, agents, state) |
-| `GET` | `/api/agents` | All agents (sorted by tier + followers) |
-| `GET` | `/api/agents/:id` | Agent detail (profile + memory + posts) |
-| `GET` | `/api/posts` | All posts (paginated, filterable by tier) |
-| `GET` | `/api/posts/:id` | Single post with reply tree |
-| `GET` | `/api/trending` | Top posts by engagement |
-| `GET` | `/api/timeline` | Per-round summaries |
-| `GET` | `/api/graph` | Social graph (nodes + edges) |
-| `POST` | `/api/simulation/pause` | Pause simulation |
-| `POST` | `/api/simulation/resume` | Resume simulation |
-| `POST` | `/api/simulation/stop` | Stop + generate report |
-| `POST` | `/api/god-eye/inject` | Inject event |
-
-### WebSocket
-
-Connect to `ws://localhost:3000/ws` for real-time events:
-
-```json
-{"type": "action",       "data": {...}}
-{"type": "round_start",  "round": 5, "active_agents": 42}
-{"type": "round_end",    "round": 5, "summary": {...}}
-{"type": "god_eye_inject", "event": {...}}
-{"type": "simulation_end", "total_rounds": 72, "total_actions": 5840}
-```
-
----
-
-## Output
-
-### JSONL Action Log
-
-Every agent action is logged to `output/actions.jsonl`:
-
-```json
-{"id":"a1b2c3","round":1,"agent_name":"analyst_jane","agent_tier":"tier1","action_type":"create_post","content":"Breaking: massive layoffs announced...","reasoning":"As an analyst, I need to comment first."}
-```
-
-### Markdown Report
-
-After the simulation, a report is generated at `output/report.md` with:
-
-1. Executive Summary
-2. Timeline of Key Events
-3. Agent Analysis (VIP behavior, most active, sentiment)
-4. Viral Content Analysis
-5. Network Dynamics
-6. Methodology Notes
-
----
-
-## How Many Rounds?
-
-Not every simulation needs 72 rounds. The right number depends on what you're looking for:
-
-| Rounds | Simulated Time | What You See | Best For |
-|--------|---------------|--------------|----------|
-| **5** | 5 hours | Immediate reactions, first takes | Quick scenario testing, "what's the initial vibe?" |
-| **15-20** | ~1 day | Camps form, counter-narratives emerge, echo chambers start | **Sweet spot for most use cases** |
-| **30** | 30 hours | Polarization, opinion shifts, social graph evolution | Studying narrative dynamics |
-| **72** | 3 days | Full news cycle: shock → debate → polarization → new equilibrium | God's Eye experiments, deep scenario exploration |
-
-**Our recommendation: start with 15 rounds.** That's enough to see second-order effects (reactions to reactions, alliances forming, sentiment shifts) without LLM agents starting to loop on repetitive patterns. Increase to 30-72 if you're using God's Eye to inject mid-simulation events — that's where high round counts shine.
+9. **Backward-compatible serialization** — all new fields use `#[serde(default)]` so saved states from older versions load without errors.
 
 ---
 
 ## Cost Estimation
 
-Swarm-Sim uses tiered batching, so costs depend on which models you assign to each tier. Here's a breakdown for **100 agents** with activity-adjusted call counts:
+Swarm-Sim uses tiered batching, so costs depend on which models you assign to each tier. Here's a breakdown for **100 agents**:
 
-### Recommended: Gemini 3 Flash ($0.50/1M in, $3.00/1M out)
-
-The best price/performance ratio. Use it for all three tiers:
+### Recommended: Gemini 2.0 Flash
 
 | Rounds | T1 Calls | T2 Calls | T3 Calls | Total Calls | **Estimated Cost** |
 |--------|----------|----------|----------|-------------|-------------------|
@@ -397,46 +448,13 @@ The best price/performance ratio. Use it for all three tiers:
 | 30 | 150 | 60 | 30 | ~245 | **~$0.31** |
 | 72 | 360 | 144 | 72 | ~580 | **~$0.73** |
 
-A full 72-round simulation with 100 agents for **under $1**. That's the power of tiered batching + cheap models.
-
-### Mixed setup (GPT-4o for VIPs, GPT-4o-mini for Standard, Gemini Flash for Figurants)
-
-| Rounds | T1 Cost | T2 Cost | T3 Cost | **Total** |
-|--------|---------|---------|---------|-----------|
-| 5 | $0.12 | $0.003 | $0.006 | **~$0.15** |
-| 15 | $0.37 | $0.009 | $0.019 | **~$0.45** |
-| 72 | $1.80 | $0.043 | $0.090 | **~$2.00** |
-
 ### vs Traditional (1 call/agent/round)
 
-| Approach | Calls (100 agents, 15 rounds) | Cost (GPT-4o) | Cost (Gemini Flash) |
-|----------|-------------------------------|---------------|---------------------|
-| Traditional | ~900 | ~$4.50 | ~$1.13 |
-| **Swarm-Sim** | ~125 | ~$0.45 | ~$0.16 |
-| **Savings** | **86% fewer calls** | **90% cheaper** | **86% cheaper** |
-
-### Config example with Gemini 3 Flash
-
-```toml
-# All tiers on Gemini 3 Flash — cheapest setup
-[tiers.tier1]
-batch_size = 1
-model = "gemini-3-flash"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key = "${GEMINI_API_KEY}"
-
-[tiers.tier2]
-batch_size = 8
-model = "gemini-3-flash"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key = "${GEMINI_API_KEY}"
-
-[tiers.tier3]
-batch_size = 25
-model = "gemini-3-flash"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key = "${GEMINI_API_KEY}"
-```
+| Approach | Calls (100 agents, 15 rounds) | Cost (Gemini Flash) |
+|----------|-------------------------------|---------------------|
+| Traditional | ~900 | ~$1.13 |
+| **Swarm-Sim** | ~125 | ~$0.16 |
+| **Savings** | **86% fewer calls** | **86% cheaper** |
 
 Any OpenAI-compatible API works: OpenAI, Google Gemini, Anthropic (via proxy), DashScope (Qwen), DeepSeek, Ollama (local), etc.
 

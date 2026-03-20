@@ -655,6 +655,25 @@ impl SimulationEngine {
         // 6. Update sentiment drift
         update_sentiments(&self.state, round).await;
 
+        // 6b. Update cognitive state and relational memory
+        update_cognitive_and_relations(&self.state, &all_actions, round).await;
+
+        // 6c. Update cascade tracking and contested status
+        {
+            let mut s = self.state.write().await;
+            s.world.update_cascades(round);
+        }
+        update_beliefs_and_contested(&self.state, &all_actions, round).await;
+
+        // 6d. Validate state consistency (debug mode)
+        if verbose {
+            let s = self.state.read().await;
+            let issues = validate_state(&s);
+            if !issues.is_empty() {
+                tracing::warn!("Round {round}: {} state validation issues", issues.len());
+            }
+        }
+
         // 7. Build round summary
         let mut new_posts = 0;
         let mut new_replies = 0;
@@ -853,6 +872,10 @@ impl SimulationEngine {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 s.world.add_post(post);
             }
@@ -886,6 +909,10 @@ impl SimulationEngine {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 s.world.add_post(post);
             }
@@ -941,12 +968,28 @@ async fn execute_batch(
             .map(|st| st.current_sentiment)
             .unwrap_or(profile.sentiment_bias);
 
-        let feed = s.world.build_feed(
+        // Use cognitive state to limit feed size + relational memory for feed bias
+        let effective_feed = agent_state
+            .map(|st| st.cognitive.effective_feed_size(world_config.feed_size))
+            .unwrap_or(world_config.feed_size);
+        let relations = agent_state.map(|st| &st.relations);
+        let relations_text = agent_state
+            .map(|st| st.relations.render_short())
+            .unwrap_or_default();
+        let beliefs_text = agent_state
+            .map(|st| st.beliefs_summary())
+            .unwrap_or_default();
+        let fatigue = agent_state
+            .map(|st| st.cognitive.fatigue)
+            .unwrap_or(0.0);
+
+        let feed = s.world.build_feed_with_relations(
             &agent_id,
-            world_config.feed_size,
+            effective_feed,
             world_config.recency_weight,
             world_config.popularity_weight,
             world_config.relevance_weight,
+            relations,
         );
         let feed_summaries: Vec<PostSummary> = feed
             .iter()
@@ -1000,6 +1043,9 @@ async fn execute_batch(
             challenge_question.as_deref(),
             &own_recent_posts,
             &notifications,
+            fatigue,
+            &relations_text,
+            &beliefs_text,
         );
 
         // Build ID resolution maps before releasing lock
@@ -1071,42 +1117,94 @@ async fn execute_batch(
             })
             .collect();
 
-        // Build shared feed (use first agent's feed as representative)
-        let first_id = agent_ids[0];
-        let feed = s.world.build_feed(
-            &first_id,
-            world_config.feed_size,
-            world_config.recency_weight,
-            world_config.popularity_weight,
-            world_config.relevance_weight,
-        );
-        let feed_summaries: Vec<PostSummary> = feed
-            .iter()
-            .take(10)
-            .map(|p| {
-                let mut summary = PostSummary::from_post(p, round, 80);
-                if let Some(parent_id) = p.reply_to {
-                    if let Some(parent) = s.world.posts.get(&parent_id) {
-                        summary.reply_to_author = Some(parent.author_name.clone());
-                    }
-                }
-                summary
-            })
-            .collect();
-
         let trending = s.world.trending(5, 10);
         let trending_summaries: Vec<PostSummary> = trending
             .iter()
             .map(|p| PostSummary::from_post(p, round, 60))
             .collect();
 
-        let system = llm::build_batch_system_prompt(&agents_with_memory, persona_max, challenge_question.as_deref());
+        let mut agent_contexts: Vec<llm::BatchAgentContext> = Vec::new();
+        for agent_id in agent_ids {
+            let Some(profile) = s.agents.get(agent_id).cloned() else {
+                continue;
+            };
+            let agent_state = s.agent_states.get(agent_id);
+            let memory = agent_state
+                .map(|st| st.memory.render_short(round, memory_recent_count))
+                .unwrap_or_default();
+            let sentiment = agent_state
+                .map(|st| st.current_sentiment)
+                .unwrap_or(profile.sentiment_bias);
+            let own_posts: Vec<String> = agent_state
+                .map(|st| {
+                    st.post_ids
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .filter_map(|pid| {
+                            s.world.posts.get(pid).map(|p| p.content.chars().take(80).collect::<String>())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let notifications = agent_state
+                .map(|st| st.pending_notifications.clone())
+                .unwrap_or_default();
+            let effective_feed = agent_state
+                .map(|st| st.cognitive.effective_feed_size(world_config.feed_size))
+                .unwrap_or(world_config.feed_size);
+            let feed = s.world.build_feed_with_relations(
+                agent_id,
+                effective_feed,
+                world_config.recency_weight,
+                world_config.popularity_weight,
+                world_config.relevance_weight,
+                agent_state.map(|st| &st.relations),
+            );
+            let feed_summaries: Vec<PostSummary> = feed
+                .iter()
+                .take(10)
+                .map(|p| {
+                    let mut summary = PostSummary::from_post(p, round, 80);
+                    if let Some(parent_id) = p.reply_to {
+                        if let Some(parent) = s.world.posts.get(&parent_id) {
+                            summary.reply_to_author = Some(parent.author_name.clone());
+                        }
+                    }
+                    summary
+                })
+                .collect();
+            let runtime_stance = Stance::from_sentiment(sentiment);
+            let reply_candidates = s.world.build_reply_candidates(agent_id, &runtime_stance, 6);
+            let fatigue = agent_state
+                .map(|st| st.cognitive.fatigue)
+                .unwrap_or(0.0);
+            let relations_short = agent_state
+                .map(|st| st.relations.render_short())
+                .unwrap_or_default();
+            let beliefs_short = agent_state
+                .map(|st| st.beliefs_summary())
+                .unwrap_or_default();
+            agent_contexts.push(llm::BatchAgentContext {
+                agent: profile,
+                memory_short: memory,
+                sentiment,
+                own_posts,
+                notifications,
+                feed_posts: feed_summaries,
+                trending_posts: trending_summaries.clone(),
+                reply_candidates,
+                fatigue,
+                relations_short,
+                beliefs_short,
+            });
+        }
+
+        let system = llm::build_batch_system_prompt(&agent_contexts, persona_max, challenge_question.as_deref());
         let user = llm::build_batch_user_prompt(
             round,
             total_rounds,
             &simulated_time,
-            &feed_summaries,
-            &trending_summaries,
             prior_actions,
             events,
             challenge_question.as_deref(),
@@ -1487,6 +1585,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: extract_hashtags(content),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_post(post);
                 if let Some(agent_state) = state.agent_states.get_mut(&action.agent_id) {
@@ -1511,6 +1613,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_post(post);
             }
@@ -1540,6 +1646,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_repost(target, repost);
             }
@@ -1561,6 +1671,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: Vec::new(),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_post(post);
                 // Also count as repost on the original
@@ -1619,6 +1733,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: extract_hashtags(content),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_post(post);
                 state.world.solution_ids.push(action.id);
@@ -1658,6 +1776,10 @@ fn apply_action(state: &mut SimulationState, action: &Action) {
                     replies: Vec::new(),
                     reposts: Vec::new(),
                     hashtags: extract_hashtags(content),
+                    cascade_depth: 0,
+                    cascade_root: None,
+                    contested: false,
+                    opposing_reply_count: 0,
                 };
                 state.world.add_post(post);
                 state.world.solution_ids.push(action.id);
@@ -1966,23 +2088,262 @@ async fn update_sentiments(state: &SharedState, round: u32) {
 }
 
 /// Simple heuristic to estimate sentiment of content (-1.0 to 1.0).
+/// Estimate sentiment of content (-1.0 to 1.0) using weighted word lists and structural cues.
+/// Goes beyond simple keyword matching with intensity weights and negation detection.
 fn estimate_content_sentiment(content: &str) -> f32 {
     let lower = content.to_lowercase();
-    let positive_words = ["great", "good", "amazing", "love", "excellent", "innovative",
-        "progress", "exciting", "brilliant", "impressive", "opportunity", "support",
-        "fantastic", "wonderful", "helpful"];
-    let negative_words = ["terrible", "awful", "hate", "worst", "greed", "scam",
-        "disaster", "outrage", "betrayal", "unacceptable", "horrible", "disgusting",
-        "shame", "pathetic", "ridiculous"];
 
-    let pos_count = positive_words.iter().filter(|w| lower.contains(*w)).count() as f32;
-    let neg_count = negative_words.iter().filter(|w| lower.contains(*w)).count() as f32;
+    // Weighted positive words: (word, weight)
+    let positive: &[(&str, f32)] = &[
+        ("great", 0.6), ("good", 0.4), ("amazing", 0.8), ("love", 0.7),
+        ("excellent", 0.8), ("progress", 0.5), ("exciting", 0.6),
+        ("brilliant", 0.7), ("impressive", 0.6), ("opportunity", 0.5),
+        ("support", 0.4), ("fantastic", 0.7), ("wonderful", 0.7),
+        ("helpful", 0.5), ("hope", 0.4), ("happy", 0.5), ("agree", 0.4),
+        ("exactly", 0.3), ("right", 0.3), ("nice", 0.3), ("glad", 0.4),
+        ("fair", 0.3), ("trust", 0.4), ("proud", 0.5), ("win", 0.5),
+        ("success", 0.5), ("improve", 0.4), ("benefit", 0.4),
+    ];
+    let negative: &[(&str, f32)] = &[
+        ("terrible", 0.8), ("awful", 0.7), ("hate", 0.7), ("worst", 0.8),
+        ("greed", 0.6), ("scam", 0.7), ("disaster", 0.8), ("outrage", 0.7),
+        ("betrayal", 0.7), ("unacceptable", 0.7), ("horrible", 0.8),
+        ("disgusting", 0.7), ("shame", 0.5), ("pathetic", 0.6),
+        ("ridiculous", 0.5), ("angry", 0.5), ("fear", 0.4), ("worried", 0.4),
+        ("wrong", 0.4), ("fail", 0.5), ("broken", 0.5), ("stupid", 0.5),
+        ("toxic", 0.6), ("corrupt", 0.6), ("lie", 0.5), ("liar", 0.6),
+        ("damage", 0.5), ("destroy", 0.6), ("threat", 0.5), ("danger", 0.5),
+        ("mess", 0.4), ("trash", 0.5), ("garbage", 0.5), ("suck", 0.5),
+    ];
 
-    if pos_count + neg_count == 0.0 {
+    let mut pos_score: f32 = 0.0;
+    let mut neg_score: f32 = 0.0;
+
+    for &(word, weight) in positive {
+        if lower.contains(word) {
+            pos_score += weight;
+        }
+    }
+    for &(word, weight) in negative {
+        if lower.contains(word) {
+            neg_score += weight;
+        }
+    }
+
+    // Structural cues
+    let exclamation_count = content.chars().filter(|&c| c == '!').count();
+    let question_mark = content.contains('?');
+    let all_caps_words = content.split_whitespace().filter(|w| w.len() > 2 && *w == w.to_uppercase()).count();
+
+    // Exclamation marks amplify existing sentiment
+    let intensity_mult = 1.0 + (exclamation_count as f32 * 0.1).min(0.3);
+    pos_score *= intensity_mult;
+    neg_score *= intensity_mult;
+
+    // ALL CAPS words suggest strong emotion (amplify whichever is dominant)
+    if all_caps_words > 0 {
+        let caps_boost = (all_caps_words as f32 * 0.1).min(0.3);
+        if pos_score > neg_score { pos_score += caps_boost; }
+        else { neg_score += caps_boost; }
+    }
+
+    // Simple negation: "not good" flips sentiment
+    let negation_words = ["not ", "don't ", "doesn't ", "isn't ", "aren't ", "wasn't ",
+        "won't ", "can't ", "never ", "no "];
+    let has_negation = negation_words.iter().any(|n| lower.contains(n));
+    if has_negation && (pos_score > 0.0 || neg_score > 0.0) {
+        std::mem::swap(&mut pos_score, &mut neg_score);
+        // Dampen the flip (negation is weaker than direct statement)
+        pos_score *= 0.7;
+        neg_score *= 0.7;
+    }
+
+    // Questions with no clear sentiment lean neutral
+    if question_mark && pos_score + neg_score < 0.5 {
         return 0.0;
     }
 
-    ((pos_count - neg_count) / (pos_count + neg_count)).clamp(-1.0, 1.0)
+    let total = pos_score + neg_score;
+    if total == 0.0 {
+        return 0.0;
+    }
+
+    ((pos_score - neg_score) / total).clamp(-1.0, 1.0)
+}
+
+/// Update cognitive state (fatigue/attention) and relational memory after a round.
+async fn update_cognitive_and_relations(state: &SharedState, actions: &[Action], round: u32) {
+    let mut s = state.write().await;
+
+    // Track which agents were active this round and how many actions they took
+    let mut action_counts: HashMap<Uuid, u32> = HashMap::new();
+    for action in actions {
+        if !matches!(action.action_type, ActionType::DoNothing | ActionType::PinMemory) {
+            *action_counts.entry(action.agent_id).or_insert(0) += 1;
+        }
+    }
+
+    // Update cognitive state for all agents
+    let all_agents: Vec<Uuid> = s.agent_states.keys().cloned().collect();
+    for agent_id in &all_agents {
+        if let Some(agent_state) = s.agent_states.get_mut(agent_id) {
+            if let Some(&count) = action_counts.get(agent_id) {
+                agent_state.cognitive.on_active_round(count);
+            } else {
+                agent_state.cognitive.on_idle_round();
+            }
+            // Decay relational memory
+            agent_state.relations.decay(round);
+        }
+    }
+
+    // Update relational memory based on interactions
+    for action in actions {
+        match &action.action_type {
+            ActionType::Like | ActionType::Repost => {
+                if let Some(target_id) = action.target_post_id {
+                    // Extract needed values before mutable borrow
+                    let post_info = s.world.posts.get(&target_id)
+                        .map(|p| (p.author_id, p.engagement_score()));
+                    if let Some((author_id, engagement)) = post_info {
+                        if author_id != action.agent_id {
+                            if let Some(agent_state) = s.agent_states.get_mut(&action.agent_id) {
+                                agent_state.relations.record_positive(author_id, round);
+                                agent_state.relations.update_influence(author_id, engagement);
+                            }
+                        }
+                    }
+                }
+            }
+            ActionType::Reply => {
+                if let Some(target_id) = action.target_post_id {
+                    // Extract needed values before mutable borrow
+                    let post_info = s.world.posts.get(&target_id)
+                        .map(|p| (p.author_id, estimate_content_sentiment(&p.content)));
+                    if let Some((author_id, post_sentiment)) = post_info {
+                        if author_id != action.agent_id {
+                            let reply_sentiment = action.content.as_ref()
+                                .map(|c| estimate_content_sentiment(c))
+                                .unwrap_or(0.0);
+                            let aligned = (reply_sentiment * post_sentiment) > 0.0
+                                || reply_sentiment.abs() < 0.1;
+
+                            if let Some(agent_state) = s.agent_states.get_mut(&action.agent_id) {
+                                if aligned {
+                                    agent_state.relations.record_positive(author_id, round);
+                                } else {
+                                    agent_state.relations.record_negative(author_id, round);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ActionType::Follow => {
+                if let Some(target_id) = action.target_agent_id {
+                    if let Some(agent_state) = s.agent_states.get_mut(&action.agent_id) {
+                        agent_state.relations.record_positive(target_id, round);
+                    }
+                }
+            }
+            ActionType::Unfollow => {
+                if let Some(target_id) = action.target_agent_id {
+                    if let Some(agent_state) = s.agent_states.get_mut(&action.agent_id) {
+                        agent_state.relations.record_negative(target_id, round);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Update agent beliefs based on content exposure, and mark contested posts.
+async fn update_beliefs_and_contested(state: &SharedState, actions: &[Action], round: u32) {
+    let mut s = state.write().await;
+
+    // Extract keywords from content for belief tracking
+    fn extract_belief_topics(content: &str) -> Vec<String> {
+        let lower = content.to_lowercase();
+        // Key topic words that represent debatable positions
+        let topic_markers = [
+            "ai", "automation", "layoffs", "jobs", "workers",
+            "technology", "regulation", "safety", "privacy", "economy",
+            "climate", "equality", "freedom", "innovation", "corporate",
+            "government", "education", "healthcare", "immigration", "rights",
+        ];
+        topic_markers.iter()
+            .filter(|&&t| lower.contains(t))
+            .map(|&s| s.to_string())
+            .collect()
+    }
+
+    // For each reply, check if it opposes the parent post -> mark contested
+    for action in actions {
+        if matches!(action.action_type, ActionType::Reply) {
+            if let (Some(target_id), Some(reply_content)) = (action.target_post_id, &action.content) {
+                // Get parent sentiment before mutable borrow
+                let parent_sentiment = s.world.posts.get(&target_id)
+                    .map(|p| estimate_content_sentiment(&p.content));
+
+                if let Some(parent_sent) = parent_sentiment {
+                    let reply_sent = estimate_content_sentiment(reply_content);
+                    // Opposing reply: sentiments have different signs and both are significant
+                    if parent_sent * reply_sent < -0.05 && parent_sent.abs() > 0.1 && reply_sent.abs() > 0.1 {
+                        s.world.mark_contested(target_id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Update beliefs for agents who saw content this round (via feed or interactions)
+    for action in actions {
+        let content = match &action.content {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => continue,
+        };
+
+        let topics = extract_belief_topics(&content);
+        if topics.is_empty() {
+            continue;
+        }
+
+        let content_sentiment = estimate_content_sentiment(&content);
+        let author_id = action.agent_id;
+
+        // Update the author's own beliefs (writing reinforces belief)
+        if let Some(agent_state) = s.agent_states.get_mut(&author_id) {
+            for topic in &topics {
+                agent_state.update_belief(topic, content_sentiment, 0.5); // self-reinforcement
+            }
+        }
+
+        // For likes/reposts, update the liker's beliefs (exposure)
+        if matches!(action.action_type, ActionType::Like | ActionType::Repost) {
+            if let Some(target_id) = action.target_post_id {
+                let target_info = s.world.posts.get(&target_id)
+                    .map(|p| (estimate_content_sentiment(&p.content), p.author_id));
+
+                if let Some((target_sent, target_author)) = target_info {
+                    let target_topics: Vec<String> = s.world.posts.get(&target_id)
+                        .map(|p| extract_belief_topics(&p.content))
+                        .unwrap_or_default();
+
+                    // Trust in the target author
+                    let trust = s.agent_states.get(&action.agent_id)
+                        .map(|st| st.relations.trust_for(&target_author))
+                        .unwrap_or(0.0);
+
+                    if let Some(agent_state) = s.agent_states.get_mut(&action.agent_id) {
+                        for topic in &target_topics {
+                            agent_state.update_belief(topic, target_sent, trust);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn extract_hashtags(content: &str) -> Vec<String> {
@@ -1998,6 +2359,11 @@ fn extract_hashtags(content: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn enforce_archetype(archetype: &BehaviorArchetype, actions: &mut Vec<Action>) {
+    // Without cognitive state, use base max
+    enforce_archetype_with_fatigue(archetype, actions, 0.0);
+}
+
+fn enforce_archetype_with_fatigue(archetype: &BehaviorArchetype, actions: &mut Vec<Action>, _fatigue: f32) {
     let max = archetype.max_actions();
 
     // For engagement-only archetypes (Lurker, Cheerleader), convert create_post to do_nothing
@@ -2147,6 +2513,78 @@ async fn build_notifications(state: &SharedState, actions: &[Action], _round: u3
 // ---------------------------------------------------------------------------
 // Webhook fire-and-forget
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// State validation — check consistency after each round
+// ---------------------------------------------------------------------------
+
+/// Validate world state consistency. Returns list of issues found (empty = OK).
+pub fn validate_state(state: &SimulationState) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    // Check: all agent_states have corresponding agents
+    for id in state.agent_states.keys() {
+        if !state.agents.contains_key(id) {
+            issues.push(format!("Orphan agent_state: {}", &id.to_string()[..8]));
+        }
+    }
+
+    // Check: all agents have agent_states
+    for id in state.agents.keys() {
+        if !state.agent_states.contains_key(id) {
+            issues.push(format!("Missing agent_state for: {}", &id.to_string()[..8]));
+        }
+    }
+
+    // Check: post authors exist in agents (except system posts)
+    for post in state.world.posts.values() {
+        if !post.author_id.is_nil() && !state.agents.contains_key(&post.author_id) {
+            issues.push(format!("Post {} has unknown author {}", post.short_id(), &post.author_id.to_string()[..8]));
+        }
+    }
+
+    // Check: reply_to references exist
+    for post in state.world.posts.values() {
+        if let Some(parent_id) = post.reply_to {
+            if !state.world.posts.contains_key(&parent_id) {
+                issues.push(format!("Post {} replies to missing post {}", post.short_id(), &parent_id.to_string()[..8]));
+            }
+        }
+    }
+
+    // Check: sentiment within valid range
+    for (id, agent_state) in &state.agent_states {
+        if agent_state.current_sentiment < -1.0 || agent_state.current_sentiment > 1.0 {
+            issues.push(format!("Agent {} sentiment out of range: {:.2}", &id.to_string()[..8], agent_state.current_sentiment));
+        }
+        if agent_state.cognitive.fatigue < 0.0 || agent_state.cognitive.fatigue > 1.0 {
+            issues.push(format!("Agent {} fatigue out of range: {:.2}", &id.to_string()[..8], agent_state.cognitive.fatigue));
+        }
+    }
+
+    // Check: social graph consistency (following/followers mirror)
+    let total_following: usize = state.world.social_graph.following.values().map(|v| v.len()).sum();
+    let total_followers: usize = state.world.social_graph.followers.values().map(|v| v.len()).sum();
+    if total_following != total_followers {
+        issues.push(format!("Social graph inconsistency: {} following vs {} followers", total_following, total_followers));
+    }
+
+    // Check: no self-follows
+    for (follower, targets) in &state.world.social_graph.following {
+        if targets.contains(follower) {
+            issues.push(format!("Self-follow detected: {}", &follower.to_string()[..8]));
+        }
+    }
+
+    if !issues.is_empty() {
+        tracing::warn!("State validation found {} issues", issues.len());
+        for issue in &issues {
+            tracing::warn!("  - {issue}");
+        }
+    }
+
+    issues
+}
 
 fn fire_webhook_if_needed(config: &SimConfig, event_type: &str, payload: &serde_json::Value) {
     if !config.webhooks.enabled {

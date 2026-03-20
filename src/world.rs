@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::agent::{Stance, Tier};
+use crate::agent::{RelationalMemory, Stance, Tier};
 
 // ---------------------------------------------------------------------------
 // Action types
@@ -93,6 +93,18 @@ pub struct Post {
     pub replies: Vec<Uuid>,
     pub reposts: Vec<Uuid>,
     pub hashtags: Vec<String>,
+    /// Cascade depth: 0 = original, 1+ = spawned from viral chain.
+    #[serde(default)]
+    pub cascade_depth: u32,
+    /// Root post of the cascade (for tracking viral spread).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cascade_root: Option<Uuid>,
+    /// Whether this post has been contested by opposing replies.
+    #[serde(default)]
+    pub contested: bool,
+    /// Number of opposing replies (for fact-check detection).
+    #[serde(default)]
+    pub opposing_reply_count: u32,
 }
 
 impl Post {
@@ -103,6 +115,18 @@ impl Post {
     /// Short ID for display (first 8 chars of UUID).
     pub fn short_id(&self) -> String {
         self.id.to_string()[..8].to_string()
+    }
+
+    /// Whether this post is viral (high engagement relative to age).
+    pub fn is_viral(&self, current_round: u32) -> bool {
+        let age = current_round.saturating_sub(self.created_at_round).max(1) as f64;
+        let velocity = self.engagement_score() / age;
+        velocity > 3.0
+    }
+
+    /// Whether this post is contested (many opposing replies).
+    pub fn is_contested(&self) -> bool {
+        self.contested || self.opposing_reply_count >= 3
     }
 }
 
@@ -239,6 +263,8 @@ impl WorldState {
     }
 
     /// Build a personalized feed for an agent.
+    /// `relations` provides trust/influence data to bias feed toward trusted sources.
+    /// `effective_feed_size` is the actual number of items the agent processes (reduced by fatigue).
     pub fn build_feed(
         &self,
         agent_id: &Uuid,
@@ -246,6 +272,19 @@ impl WorldState {
         recency_w: f32,
         popularity_w: f32,
         relevance_w: f32,
+    ) -> Vec<&Post> {
+        self.build_feed_with_relations(agent_id, feed_size, recency_w, popularity_w, relevance_w, None)
+    }
+
+    /// Build a personalized feed with relational memory influencing visibility.
+    pub fn build_feed_with_relations(
+        &self,
+        agent_id: &Uuid,
+        feed_size: usize,
+        recency_w: f32,
+        popularity_w: f32,
+        relevance_w: f32,
+        relations: Option<&RelationalMemory>,
     ) -> Vec<&Post> {
         let following = self
             .social_graph
@@ -257,7 +296,21 @@ impl WorldState {
         let mut scored: Vec<(&Post, f64)> = self
             .posts
             .values()
-            .filter(|p| p.author_id != *agent_id)
+            .filter(|p| {
+                if p.author_id == *agent_id {
+                    return false;
+                }
+                // Diffusion différée: non-followed, non-viral posts have delayed visibility
+                let is_followed = following.contains(&p.author_id);
+                let age = self.current_round.saturating_sub(p.created_at_round);
+                if is_followed || p.is_viral(self.current_round) {
+                    true // immediate visibility
+                } else if p.engagement_score() > 2.0 {
+                    age >= 1 // popular but not viral: 1 round delay
+                } else {
+                    age >= 2 // unknown content: 2 round delay (may never be seen)
+                }
+            })
             .map(|post| {
                 let age = (self.current_round.saturating_sub(post.created_at_round)) as f64;
                 let recency = 1.0 / (1.0 + age);
@@ -265,12 +318,28 @@ impl WorldState {
                 let followed = if following.contains(&post.author_id) {
                     1.0
                 } else {
-                    0.2 // Non-followed content still gets baseline visibility
+                    0.2
                 };
+
+                // Relational bias: boost posts from trusted agents, suppress distrusted ones
+                let relation_boost = relations.map_or(0.0, |rel| {
+                    let trust = rel.trust_for(&post.author_id) as f64;
+                    let influence = rel.influence_of(&post.author_id) as f64;
+                    trust * 0.3 + influence * 0.2
+                });
+
+                // Contested posts get a visibility boost (controversy drives engagement)
+                let controversy_boost = if post.is_contested() { 0.15 } else { 0.0 };
+
+                // Cascade bonus: posts in active cascade chains get more visibility
+                let cascade_boost = if post.cascade_depth > 0 { 0.1 } else { 0.0 };
 
                 let score = recency_w as f64 * recency
                     + popularity_w as f64 * engagement
-                    + relevance_w as f64 * followed;
+                    + relevance_w as f64 * followed
+                    + relation_boost
+                    + controversy_boost
+                    + cascade_boost;
 
                 (post, score)
             })
@@ -356,6 +425,8 @@ impl WorldState {
             let is_active_thread = is_thread_reply
                 && (post.engagement_score() > 1.0 || !post.replies.is_empty());
 
+            let is_contested = post.is_contested();
+
             if is_opposing {
                 candidates.push(ReplyCandidate {
                     post_id: post.id,
@@ -363,6 +434,15 @@ impl WorldState {
                     content_preview: content_preview.clone(),
                     engagement: post.engagement_score(),
                     reason: "DISAGREES with your stance. Push back or engage.".into(),
+                });
+            } else if is_contested && !is_thread_reply {
+                // Contested posts: the debate is live, jump in with your perspective
+                candidates.push(ReplyCandidate {
+                    post_id: post.id,
+                    author_name: post.author_name.clone(),
+                    content_preview: content_preview.clone(),
+                    engagement: post.engagement_score(),
+                    reason: "CONTESTED — people disagree on this. Add your perspective or fact-check it.".into(),
                 });
             } else if is_active_thread {
                 candidates.push(ReplyCandidate {
@@ -391,16 +471,18 @@ impl WorldState {
             }
         }
 
-        // Sort: opposing first, then active threads, then viral, then followed
+        // Sort: opposing first, then contested, then active threads, then viral, then followed
         candidates.sort_by(|a, b| {
             let a_priority = if a.reason.contains("DISAGREES") { 0 }
-                else if a.reason.contains("ACTIVE THREAD") { 1 }
-                else if a.reason.contains("VIRAL") { 2 }
-                else { 3 };
+                else if a.reason.contains("CONTESTED") { 1 }
+                else if a.reason.contains("ACTIVE THREAD") { 2 }
+                else if a.reason.contains("VIRAL") { 3 }
+                else { 4 };
             let b_priority = if b.reason.contains("DISAGREES") { 0 }
-                else if b.reason.contains("ACTIVE THREAD") { 1 }
-                else if b.reason.contains("VIRAL") { 2 }
-                else { 3 };
+                else if b.reason.contains("CONTESTED") { 1 }
+                else if b.reason.contains("ACTIVE THREAD") { 2 }
+                else if b.reason.contains("VIRAL") { 3 }
+                else { 4 };
             a_priority.cmp(&b_priority)
                 .then(b.engagement.partial_cmp(&a.engagement).unwrap_or(std::cmp::Ordering::Equal))
         });
@@ -446,6 +528,78 @@ impl WorldState {
                 post.likes.push(agent_id);
             }
         }
+    }
+
+    /// Mark a post as contested when it receives opposing replies.
+    pub fn mark_contested(&mut self, post_id: Uuid) {
+        if let Some(post) = self.posts.get_mut(&post_id) {
+            post.opposing_reply_count += 1;
+            if post.opposing_reply_count >= 2 {
+                post.contested = true;
+            }
+        }
+    }
+
+    /// Update cascade tracking for a round. Detect viral cascades and propagate cascade info.
+    pub fn update_cascades(&mut self, current_round: u32) {
+        // Find posts that just went viral (high engagement velocity)
+        let viral_ids: Vec<Uuid> = self.posts.values()
+            .filter(|p| {
+                p.is_viral(current_round)
+                    && p.cascade_root.is_none()
+                    && p.reply_to.is_none()
+                    && p.repost_of.is_none()
+            })
+            .map(|p| p.id)
+            .collect();
+
+        // Mark them as cascade roots
+        for id in &viral_ids {
+            if let Some(post) = self.posts.get_mut(id) {
+                post.cascade_root = Some(*id);
+            }
+        }
+
+        // Propagate cascade info to reposts/quotes of cascade posts
+        let cascade_posts: Vec<(Uuid, Uuid, u32)> = self.posts.values()
+            .filter(|p| p.cascade_root.is_some())
+            .map(|p| (p.id, p.cascade_root.unwrap(), p.cascade_depth))
+            .collect();
+
+        for (post_id, root, depth) in &cascade_posts {
+            // Find reposts/quotes of this post that don't have cascade info yet
+            let children: Vec<Uuid> = self.posts.values()
+                .filter(|p| {
+                    (p.repost_of == Some(*post_id) || p.quote_of == Some(*post_id))
+                        && p.cascade_root.is_none()
+                })
+                .map(|p| p.id)
+                .collect();
+
+            for child_id in children {
+                if let Some(child) = self.posts.get_mut(&child_id) {
+                    child.cascade_root = Some(*root);
+                    child.cascade_depth = depth + 1;
+                }
+            }
+        }
+    }
+
+    /// Get cascade statistics: (root_post_id, total_posts_in_cascade, max_depth)
+    pub fn cascade_stats(&self) -> Vec<(Uuid, usize, u32)> {
+        let mut cascades: HashMap<Uuid, (usize, u32)> = HashMap::new();
+        for post in self.posts.values() {
+            if let Some(root) = post.cascade_root {
+                let entry = cascades.entry(root).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 = entry.1.max(post.cascade_depth);
+            }
+        }
+        let mut stats: Vec<_> = cascades.into_iter()
+            .map(|(root, (count, depth))| (root, count, depth))
+            .collect();
+        stats.sort_by(|a, b| b.1.cmp(&a.1));
+        stats
     }
 
     /// Record a repost.

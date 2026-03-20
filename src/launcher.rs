@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rand::seq::SliceRandom;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -20,7 +21,17 @@ pub struct LaunchRequest {
     pub seed_document_text: Option<String>,
     pub target_agent_count: Option<u32>,
     pub challenge_question: Option<String>,
+    /// Simulation mode: "standard", "what_if", "crisis", "policy", "brand", "research".
+    /// Each mode adjusts agent behavior and metrics focus.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// For "what_if" mode: the intervention to test.
+    pub what_if_intervention: Option<String>,
+    /// For "research" mode: fixed random seed for reproducibility.
+    pub research_seed: Option<u64>,
 }
+
+fn default_mode() -> String { "standard".to_string() }
 
 pub async fn launch_simulation(
     req: LaunchRequest,
@@ -31,11 +42,51 @@ pub async fn launch_simulation(
 ) -> anyhow::Result<EngineControls> {
     // Build config from base + overrides
     let mut config = base_config.clone();
-    config.simulation.scenario_prompt = req.scenario_prompt;
     config.simulation.challenge_question = req.challenge_question;
     if let Some(rounds) = req.total_rounds {
         config.simulation.total_rounds = rounds;
     }
+    if let Some(seed) = req.research_seed {
+        config.simulation.random_seed = seed;
+    }
+
+    // Apply mode-specific scenario augmentation
+    config.simulation.scenario_prompt = match req.mode.as_str() {
+        "crisis" => format!(
+            "[CRISIS SIMULATION] {}\n\nThis is an ACUTE CRISIS. Agents should show heightened emotions, \
+             urgency, fear, anger, confusion. Information spreads rapidly. Misinformation is likely. \
+             Some agents panic, others try to calm the situation. Official channels compete with rumors.",
+            req.scenario_prompt
+        ),
+        "what_if" => {
+            let intervention = req.what_if_intervention.as_deref().unwrap_or("an unspecified change");
+            format!(
+                "[WHAT-IF SCENARIO] Base scenario: {}\n\nINTERVENTION: {}\n\n\
+                 Agents must react to this specific intervention. How does this change shift opinions, \
+                 alliances, and behavior compared to the base scenario?",
+                req.scenario_prompt, intervention
+            )
+        },
+        "policy" => format!(
+            "[POLICY TEST] {}\n\nThis is a POLICY ANNOUNCEMENT being tested on public opinion. \
+             Focus on: stakeholder reactions, public acceptance, concerns raised, potential backlash, \
+             and constructive feedback. Agents should evaluate trade-offs, not just react emotionally.",
+            req.scenario_prompt
+        ),
+        "brand" => format!(
+            "[BRAND REPUTATION ANALYSIS] {}\n\nFocus on brand perception: loyalty defenders vs critics, \
+             customer sentiment shifts, competitor reactions, PR impact, backlash patterns, and recovery potential. \
+             Track how brand advocates and detractors mobilize.",
+            req.scenario_prompt
+        ),
+        "research" => format!(
+            "[REPRODUCIBLE RESEARCH RUN] {}\n\nThis is a controlled research simulation. \
+             Agents should behave consistently with their profiles. Focus on measurable dynamics: \
+             opinion diffusion speed, cascade patterns, polarization evolution, and influence concentration.",
+            req.scenario_prompt
+        ),
+        _ => req.scenario_prompt, // "standard" or unknown
+    };
 
     // Parse seed documents
     let mut documents = Vec::new();
@@ -245,7 +296,11 @@ pub async fn continue_simulation(
     Ok(controls)
 }
 
-/// Pre-populate the social graph so agents start with followers/following from round 1.
+/// Pre-populate the social graph with realistic structure.
+/// - Power-law follower distribution (few hubs, many peripherals)
+/// - Community clusters with sparse cross-community bridges
+/// - Some isolated/low-connectivity agents (lurkers)
+/// - VIPs don't get followed by everyone
 pub fn seed_social_graph(state: &mut SimulationState) {
     let tier1_ids: Vec<Uuid> = state
         .agents
@@ -261,57 +316,102 @@ pub fn seed_social_graph(state: &mut SimulationState) {
         .map(|(id, _)| *id)
         .collect();
 
-    let all_ids: Vec<Uuid> = state.agents.keys().cloned().collect();
+    let mut all_ids: Vec<Uuid> = state.agents.keys().cloned().collect();
+    all_ids.sort_by_key(|id| id.to_string());
 
-    // All agents follow all Tier1 VIPs (public figures)
+    // Create 4-6 communities based on stance/interests alignment
+    let n_communities = (all_ids.len() / 8).max(3).min(6);
+    let mut communities: Vec<Vec<Uuid>> = (0..n_communities).map(|_| Vec::new()).collect();
+
+    // Assign agents to communities based on stance similarity (not round-robin)
+    for &id in &all_ids {
+        let profile = match state.agents.get(&id) {
+            Some(p) => p,
+            None => continue,
+        };
+        // Community assignment based on stance + a bit of randomness
+        let base = match profile.stance {
+            crate::agent::Stance::Supportive => 0,
+            crate::agent::Stance::Opposing => 1,
+            crate::agent::Stance::Neutral => 2,
+            crate::agent::Stance::Observer => 3,
+        };
+        let jitter = (rand::random::<usize>()) % 2; // some randomness
+        let community_idx = (base + jitter) % n_communities;
+        communities[community_idx].push(id);
+    }
+
+    let mut add_follow = |follower: Uuid, target: Uuid, state: &mut SimulationState| {
+        if follower == target || state.world.social_graph.is_following(&follower, &target) {
+            return;
+        }
+        state.world.social_graph.add_follow(follower, target);
+        if let Some(st) = state.agent_states.get_mut(&follower) {
+            st.following.push(target);
+        }
+        if let Some(st) = state.agent_states.get_mut(&target) {
+            st.followers.push(follower);
+        }
+    };
+
+    // VIP-to-VIP: sparse connections (they don't all know each other)
     for &vip_id in &tier1_ids {
+        for &other_vip in &tier1_ids {
+            if vip_id != other_vip && rand::random::<f32>() < 0.35 {
+                add_follow(vip_id, other_vip, state);
+            }
+        }
+    }
+
+    // VIPs get followed based on power-law: first VIP gets most, last gets least
+    // NOT everyone follows every VIP
+    for (vip_rank, &vip_id) in tier1_ids.iter().enumerate() {
+        // Base probability decreases with rank (first VIP = most popular)
+        let base_prob = 0.5 / (1.0 + vip_rank as f32 * 0.3);
         for &agent_id in &all_ids {
             if agent_id == vip_id {
                 continue;
             }
-            state.world.social_graph.add_follow(agent_id, vip_id);
-            if let Some(agent_state) = state.agent_states.get_mut(&agent_id) {
-                if !agent_state.following.contains(&vip_id) {
-                    agent_state.following.push(vip_id);
-                }
-            }
-            if let Some(vip_state) = state.agent_states.get_mut(&vip_id) {
-                if !vip_state.followers.contains(&agent_id) {
-                    vip_state.followers.push(agent_id);
-                }
+            // Agents in same community as VIP follow more
+            let same_community = communities.iter().any(|c| c.contains(&vip_id) && c.contains(&agent_id));
+            let prob = if same_community { base_prob * 1.3 } else { base_prob * 0.7 };
+            if rand::random::<f32>() < prob {
+                add_follow(agent_id, vip_id, state);
             }
         }
     }
 
-    // Tier2 agents follow each other with 60% probability
-    for i in 0..tier2_ids.len() {
-        for j in 0..tier2_ids.len() {
-            if i == j {
-                continue;
+    // Tier2: follow within community (dense) + sparse cross-community bridges
+    for &agent_id in &tier2_ids {
+        let community_idx = communities
+            .iter()
+            .position(|c| c.contains(&agent_id))
+            .unwrap_or(0);
+        let community = &communities[community_idx];
+        let mut rng = rand::thread_rng();
+
+        // Follow 2-4 within community
+        let same_comm: Vec<Uuid> = community.iter().copied().filter(|id| *id != agent_id).collect();
+        let n_same = 2 + (rand::random::<usize>() % 3);
+        for target in same_comm.choose_multiple(&mut rng, n_same.min(same_comm.len())) {
+            if rand::random::<f32>() < 0.7 {
+                add_follow(agent_id, *target, state);
             }
-            let roll: f32 = rand::random();
-            if roll < 0.6 {
-                let follower = tier2_ids[i];
-                let target = tier2_ids[j];
-                if !state.world.social_graph.is_following(&follower, &target) {
-                    state.world.social_graph.add_follow(follower, target);
-                    if let Some(st) = state.agent_states.get_mut(&follower) {
-                        if !st.following.contains(&target) {
-                            st.following.push(target);
-                        }
-                    }
-                    if let Some(st) = state.agent_states.get_mut(&target) {
-                        if !st.followers.contains(&follower) {
-                            st.followers.push(follower);
-                        }
-                    }
-                }
+        }
+
+        // Bridge: follow 0-2 outside community (sparse, creates inter-community links)
+        let external: Vec<Uuid> = all_ids.iter().copied()
+            .filter(|id| !community.contains(id) && *id != agent_id && !tier1_ids.contains(id))
+            .collect();
+        let n_ext = rand::random::<usize>() % 3; // 0, 1, or 2
+        for target in external.choose_multiple(&mut rng, n_ext.min(external.len())) {
+            if rand::random::<f32>() < 0.3 {
+                add_follow(agent_id, *target, state);
             }
         }
     }
 
-    // Tier3 figurants follow 3-8 random agents
-    let non_tier1_non_self: Vec<Uuid> = all_ids.clone();
+    // Tier3: realistic power-law following count
     for &agent_id in &all_ids {
         let profile = match state.agents.get(&agent_id) {
             Some(p) => p,
@@ -320,36 +420,48 @@ pub fn seed_social_graph(state: &mut SimulationState) {
         if !matches!(profile.tier, Tier::Tier3) {
             continue;
         }
-        // Already follows all T1 from above, now add 3-8 more random follows
-        let extra_follows: usize = 3 + (rand::random::<usize>() % 6);
-        let mut followed_count = 0;
-        for &target_id in &non_tier1_non_self {
-            if followed_count >= extra_follows {
-                break;
+
+        let community_idx = communities
+            .iter()
+            .position(|c| c.contains(&agent_id))
+            .unwrap_or(0);
+        let community = &communities[community_idx];
+        let mut rng = rand::thread_rng();
+
+        // Lurkers follow very few, normies follow a moderate amount
+        let base_follows = match profile.archetype {
+            crate::agent::BehaviorArchetype::Lurker => 1 + (rand::random::<usize>() % 2),
+            crate::agent::BehaviorArchetype::Normie => 2 + (rand::random::<usize>() % 3),
+            _ => 2 + (rand::random::<usize>() % 4),
+        };
+
+        // Follow within community
+        let mut targets: Vec<Uuid> = community.iter().copied()
+            .filter(|id| *id != agent_id)
+            .collect();
+        targets.shuffle(&mut rng);
+        for target in targets.into_iter().take(base_follows) {
+            if rand::random::<f32>() < 0.6 {
+                add_follow(agent_id, target, state);
             }
-            if target_id == agent_id || tier1_ids.contains(&target_id) {
-                continue;
-            }
-            let roll: f32 = rand::random();
-            if roll < 0.15 {
-                if !state.world.social_graph.is_following(&agent_id, &target_id) {
-                    state.world.social_graph.add_follow(agent_id, target_id);
-                    if let Some(st) = state.agent_states.get_mut(&agent_id) {
-                        if !st.following.contains(&target_id) {
-                            st.following.push(target_id);
-                        }
-                    }
-                    if let Some(st) = state.agent_states.get_mut(&target_id) {
-                        if !st.followers.contains(&agent_id) {
-                            st.followers.push(agent_id);
-                        }
-                    }
-                    followed_count += 1;
-                }
-            }
+        }
+
+        // Maybe follow 1 VIP (not all!)
+        if !tier1_ids.is_empty() && rand::random::<f32>() < 0.35 {
+            let vip = tier1_ids[rand::random::<usize>() % tier1_ids.len()];
+            add_follow(agent_id, vip, state);
         }
     }
 
+    // Some agents should be completely isolated (5-10% of tier3)
+    // They already are if they got unlucky with the random rolls above
+
     let total_follows: usize = state.world.social_graph.following.values().map(|v| v.len()).sum();
-    tracing::info!("Seeded social graph: {} follow relationships", total_follows);
+    let isolated = all_ids.iter()
+        .filter(|id| state.world.social_graph.following.get(id).map_or(true, |f| f.is_empty()))
+        .count();
+    tracing::info!(
+        "Seeded social graph: {} follow relationships, {} isolated agents, {} communities",
+        total_follows, isolated, n_communities
+    );
 }

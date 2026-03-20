@@ -72,6 +72,18 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/simulation/save", post(save_state))
         .route("/api/simulation/load", post(load_state))
         .route("/api/god-eye/inject", post(inject_event))
+        .route("/api/metrics", get(get_metrics))
+        .route("/api/metrics/polarization", get(get_polarization))
+        .route("/api/metrics/virality", get(get_virality))
+        .route("/api/metrics/influence", get(get_influence))
+        .route("/api/metrics/cascades", get(get_cascades))
+        .route("/api/metrics/community", get(get_community_metrics))
+        .route("/api/metrics/contagion", get(get_contagion))
+        .route("/api/metrics/cognitive", get(get_cognitive_metrics))
+        .route("/api/metrics/compare", post(compare_runs))
+        .route("/api/validate", get(validate_state_endpoint))
+        .route("/api/export/json", get(export_json))
+        .route("/api/export/metrics", get(export_metrics_json))
         // WebSocket
         .route("/ws", get(ws_handler))
         // Static files (web UI)
@@ -819,6 +831,169 @@ async fn load_state(State(state): State<AppState>) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics endpoints
+// ---------------------------------------------------------------------------
+
+async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics)
+}
+
+async fn get_polarization(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.polarization)
+}
+
+async fn get_virality(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.virality)
+}
+
+async fn get_influence(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.influence)
+}
+
+async fn get_cascades(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let cascade_stats = s.world.cascade_stats();
+    let cascades: Vec<serde_json::Value> = cascade_stats.iter()
+        .filter_map(|(root_id, size, depth)| {
+            let post = s.world.posts.get(root_id)?;
+            Some(serde_json::json!({
+                "root_id": root_id.to_string(),
+                "root_author": post.author_name,
+                "root_content": post.content.chars().take(120).collect::<String>(),
+                "size": size,
+                "max_depth": depth,
+                "engagement": post.engagement_score(),
+            }))
+        })
+        .collect();
+    Json(cascades)
+}
+
+async fn get_community_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.community)
+}
+
+async fn get_contagion(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.contagion)
+}
+
+async fn get_cognitive_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(metrics.cognitive)
+}
+
+/// Compare current run metrics with a saved run.
+async fn compare_runs(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let current_metrics = crate::metrics::compute_metrics(&s);
+
+    // Try to load saved state for comparison
+    let save_path = s.config.output.output_dir.join("state.json");
+    if !save_path.exists() {
+        return Json(serde_json::json!({
+            "error": "No saved state to compare. Save a run first with /api/simulation/save.",
+            "current": current_metrics,
+        })).into_response();
+    }
+
+    match crate::engine::SimulationState::load_from_file(&save_path) {
+        Ok(saved_state) => {
+            let saved_metrics = crate::metrics::compute_metrics(&saved_state);
+            Json(serde_json::json!({
+                "current": current_metrics,
+                "saved": saved_metrics,
+                "delta": {
+                    "polarization_delta": current_metrics.polarization.polarization_index - saved_metrics.polarization.polarization_index,
+                    "viral_count_delta": current_metrics.virality.viral_post_count as i32 - saved_metrics.virality.viral_post_count as i32,
+                    "engagement_gini_delta": current_metrics.influence.engagement_gini - saved_metrics.influence.engagement_gini,
+                    "echo_chamber_delta": current_metrics.community.echo_chamber_score - saved_metrics.community.echo_chamber_score,
+                    "contested_delta": current_metrics.content.contested_count as i32 - saved_metrics.content.contested_count as i32,
+                }
+            })).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "error": format!("Failed to load saved state: {e}"),
+                "current": current_metrics,
+            }))).into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation & Export
+// ---------------------------------------------------------------------------
+
+async fn validate_state_endpoint(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let issues = crate::engine::validate_state(&s);
+    Json(serde_json::json!({
+        "valid": issues.is_empty(),
+        "issue_count": issues.len(),
+        "issues": issues,
+    }))
+}
+
+async fn export_json(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+
+    // Build a comprehensive export
+    let export = serde_json::json!({
+        "metadata": {
+            "scenario": s.config.simulation.scenario_prompt,
+            "total_rounds": s.world.current_round,
+            "total_agents": s.agents.len(),
+            "total_posts": s.world.posts.len(),
+            "total_actions": s.total_actions,
+            "exported_at": chrono::Utc::now().to_rfc3339(),
+        },
+        "metrics": metrics,
+        "agents": s.agents.values().map(|a| serde_json::json!({
+            "id": a.id,
+            "username": a.username,
+            "name": a.name,
+            "tier": a.tier.to_string(),
+            "stance": a.stance.to_string(),
+            "archetype": a.archetype.to_string(),
+            "sentiment": s.agent_states.get(&a.id).map(|st| st.current_sentiment).unwrap_or(0.0),
+            "fatigue": s.agent_states.get(&a.id).map(|st| st.cognitive.fatigue).unwrap_or(0.0),
+            "post_count": s.agent_states.get(&a.id).map(|st| st.post_ids.len()).unwrap_or(0),
+            "follower_count": s.world.social_graph.follower_count(&a.id),
+            "beliefs": s.agent_states.get(&a.id).map(|st| &st.beliefs),
+        })).collect::<Vec<_>>(),
+        "round_summaries": s.world.round_summaries,
+        "syntheses": s.syntheses,
+    });
+
+    Json(export)
+}
+
+async fn export_metrics_json(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    let metrics = crate::metrics::compute_metrics(&s);
+    Json(serde_json::json!({
+        "scenario": s.config.simulation.scenario_prompt,
+        "rounds": s.world.current_round,
+        "agents": s.agents.len(),
+        "metrics": metrics,
+    }))
 }
 
 // ---------------------------------------------------------------------------
