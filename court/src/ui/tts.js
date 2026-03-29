@@ -130,18 +130,9 @@ function streamAndPlay(text, voice) {
     ws.binaryType = 'arraybuffer';
 
     let scheduledEnd = audioCtx.currentTime;
-    let lastSource = null;
-    let wsOpen = true;
+    let chunkCount = 0;
+    let wsDone = false;
     let resolved = false;
-
-    const tryResolve = () => {
-      if (resolved) return;
-      // Resolve only when WS is closed AND last source has ended
-      if (!wsOpen && !lastSource) {
-        resolved = true;
-        resolve();
-      }
-    };
 
     ws.onopen = () => {
       ws.send(JSON.stringify({ text, voice }));
@@ -149,7 +140,6 @@ function streamAndPlay(text, voice) {
 
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        // DONE or error
         ws.close();
         return;
       }
@@ -157,49 +147,54 @@ function streamAndPlay(text, voice) {
       const pcmBytes = new Uint8Array(event.data);
       if (pcmBytes.length < 20) return;
 
-      // Decode PCM16 LE → Float32
       const samples = new Float32Array(pcmBytes.length / 2);
       const view = new DataView(event.data);
       for (let i = 0; i < samples.length; i++) {
         samples[i] = view.getInt16(i * 2, true) / 32768;
       }
 
-      // Create and schedule buffer
       const buf = audioCtx.createBuffer(1, samples.length, SAMPLE_RATE);
       buf.getChannelData(0).set(samples);
       const src = audioCtx.createBufferSource();
       src.buffer = buf;
       src.connect(audioCtx.destination);
 
+      // Always schedule AFTER the previous chunk — never overlap
       const startTime = Math.max(scheduledEnd, audioCtx.currentTime);
       src.start(startTime);
       scheduledEnd = startTime + buf.duration;
+      chunkCount++;
+    };
 
-      // Track the last source
-      lastSource = src;
-      src.onended = () => {
-        // Only care about the LAST source's onended
-        if (src === lastSource) {
-          lastSource = null;
-          tryResolve();
+    const waitForAudioAndResolve = () => {
+      if (resolved) return;
+      resolved = true;
+
+      if (chunkCount === 0) {
+        resolve();
+        return;
+      }
+
+      // Wait until all scheduled audio has finished playing
+      // Use a poll instead of onended (onended is unreliable for chained buffers)
+      const check = () => {
+        if (audioCtx.currentTime >= scheduledEnd - 0.05) {
+          resolve();
+        } else {
+          setTimeout(check, 100);
         }
       };
+      check();
     };
 
     ws.onclose = () => {
-      wsOpen = false;
-      // If no audio was received, resolve immediately
-      if (!lastSource) {
-        resolved = true;
-        resolve();
-      }
-      // Otherwise tryResolve will fire from the last source's onended
-      tryResolve();
+      wsDone = true;
+      waitForAudioAndResolve();
     };
 
     ws.onerror = () => {
-      wsOpen = false;
-      if (!resolved) { resolved = true; resolve(); }
+      wsDone = true;
+      waitForAudioAndResolve();
     };
 
     // Hard timeout
