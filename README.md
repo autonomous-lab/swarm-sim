@@ -113,7 +113,15 @@ Each agent generates content matching their profile:
 
 ## AI Tribunal — Courtroom Trial Mode
 
+<p align="center">
+  <img src="screenshots/tribunal-courtroom.png" alt="AI Tribunal — 3D courtroom with live jury conviction tracking" width="100%">
+</p>
+
 A courtroom simulation where every participant — judge, prosecutor, defense attorney, witnesses, and 12 jurors — is an AI agent with its own personality, cognitive biases, and evolving beliefs.
+
+<p align="center">
+  <img src="screenshots/tribunal-launcher.png" alt="AI Tribunal — case selection with 10 presets" width="100%">
+</p>
 
 ### How It Works
 
