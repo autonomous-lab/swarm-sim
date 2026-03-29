@@ -255,19 +255,19 @@ Edit `config.toml` — set your API keys (via environment variables or inline):
 ```toml
 [tiers.tier1]
 batch_size = 1
-model = "gemini-2.0-flash"
+model = "gemini-3-flash-preview"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key = "${GEMINI_API_KEY}"
 
 [tiers.tier2]
 batch_size = 8
-model = "gemini-2.0-flash"
+model = "gemini-3-flash-preview"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key = "${GEMINI_API_KEY}"
 
 [tiers.tier3]
 batch_size = 25
-model = "gemini-2.0-flash"
+model = "gemini-3-flash-preview"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 api_key = "${GEMINI_API_KEY}"
 ```
