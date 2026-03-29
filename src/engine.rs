@@ -10,6 +10,7 @@ use crate::agent::{ActionLogEntry, AgentProfile, AgentState, BehaviorArchetype, 
 use crate::config::SimConfig;
 use crate::llm::{self, LlmClient, PostSummary};
 use crate::output::{self, ActionLogger};
+use crate::trial::{TrialState, TrialSchedule, TrialPhase, CourtRole, JurorState, Party};
 use crate::world::*;
 
 use regex_lite::Regex;
@@ -55,6 +56,9 @@ pub struct SimulationState {
     pub syntheses: Vec<(u32, String)>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Trial-mode state (None for standard simulations).
+    #[serde(default)]
+    pub trial: Option<TrialState>,
 }
 
 impl SimulationState {
@@ -144,6 +148,51 @@ pub enum WsEvent {
         prompt_tokens: u64,
         completion_tokens: u64,
     },
+    // Trial-specific events
+    #[serde(rename = "trial_argument")]
+    TrialArgument {
+        round: u32,
+        speaker_id: String,
+        speaker_name: String,
+        speaker_role: String,
+        content: String,
+        jury_impact: Vec<(u8, f32, f32)>, // (seat, delta, new_conviction)
+    },
+    #[serde(rename = "trial_jury_update")]
+    TrialJuryUpdate {
+        round: u32,
+        jurors: Vec<TrialJurorSnapshot>,
+    },
+    #[serde(rename = "trial_phase_change")]
+    TrialPhaseChange {
+        phase: String,
+        round: u32,
+    },
+    #[serde(rename = "trial_objection")]
+    TrialObjection {
+        round: u32,
+        by_name: String,
+        grounds: String,
+        ruling: String,
+    },
+    #[serde(rename = "trial_verdict")]
+    TrialVerdict {
+        result: String,
+        guilty: usize,
+        not_guilty: usize,
+        unanimous: bool,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrialJurorSnapshot {
+    pub seat: u8,
+    pub name: String,
+    pub conviction: f32,
+    pub confidence: f32,
+    pub conviction_label: String,
+    pub trust_prosecution: f32,
+    pub trust_defense: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +514,19 @@ impl SimulationEngine {
             let mut s = self.state.write().await;
             s.world.current_round = round;
             s.world.simulated_time += Duration::minutes(minutes);
+        }
+
+        // Trial mode: delegate to trial engine
+        {
+            let is_trial = self.state.read().await.trial.is_some();
+            if is_trial {
+                return crate::trial_engine::execute_trial_round(
+                    self.state.clone(),
+                    self.llm.clone(),
+                    &self.ws_tx,
+                    round,
+                ).await;
+            }
         }
 
         // 2. Process God's Eye events

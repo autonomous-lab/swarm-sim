@@ -9,6 +9,9 @@ mod output;
 mod parser;
 mod report;
 mod server;
+mod trial;
+mod trial_engine;
+mod trial_store;
 mod world;
 
 use std::collections::HashMap;
@@ -215,6 +218,7 @@ async fn cmd_report(
         syntheses: Vec::new(),
         prompt_tokens: 0,
         completion_tokens: 0,
+        trial: None,
     };
 
     let report_text = report::generate_report(&llm, &state).await?;
@@ -247,6 +251,7 @@ async fn cmd_server(config_path: &std::path::Path) -> anyhow::Result<()> {
         syntheses: Vec::new(),
         prompt_tokens: 0,
         completion_tokens: 0,
+        trial: None,
     }));
 
     let (ws_tx, _) = broadcast::channel::<engine::WsEvent>(1024);
@@ -365,6 +370,7 @@ async fn cmd_run(
         syntheses: Vec::new(),
         prompt_tokens: 0,
         completion_tokens: 0,
+        trial: None,
     };
 
     // Seed social graph before simulation starts

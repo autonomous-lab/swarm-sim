@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>AI Tribunal</title>
+  <link rel="stylesheet" href="style.css?v=7">
+</head>
+<body>
+  <!-- Launcher overlay -->
+  <div id="launcher-overlay">
+    <div id="launcher">
+      <h1 id="launcher-title">AI <span>Tribunal</span></h1>
+      <p id="launcher-subtitle">Courtroom simulation engine</p>
+
+      <div id="launcher-form">
+        <label for="case-input">Describe the case</label>
+        <textarea id="case-input" rows="5" placeholder="e.g. The People v. John Doe, charged with embezzlement of $2M from a non-profit organization..."></textarea>
+
+        <div id="launcher-actions">
+          <button id="btn-randomize" title="Random case">Randomize</button>
+          <div id="launcher-options">
+            <label id="realtime-label">
+              <input type="checkbox" id="realtime-toggle">
+              Real-time mode (TTS + narration)
+            </label>
+          </div>
+          <button id="btn-launch">Start Trial</button>
+        </div>
+      </div>
+
+      <div id="launcher-presets">
+        <p class="presets-label">Or pick a case:</p>
+        <div id="preset-list"></div>
+      </div>
+
+      <div id="past-trials">
+        <p class="presets-label">Past trials:</p>
+        <div id="past-trials-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading-overlay" class="hidden">
+    <div id="loading-content">
+      <div id="loading-spinner"></div>
+      <h2 id="loading-title">Preparing the courtroom...</h2>
+      <p id="loading-detail">Generating court participants and case details</p>
+    </div>
+  </div>
+
+  <!-- Three.js canvas -->
+  <div id="canvas-container"></div>
+
+  <!-- HUD overlay -->
+  <div id="hud">
+    <div id="hud-top">
+      <div id="hud-phase">
+        <span id="phase-icon">&#9878;</span>
+        <span id="phase-label">Opening Statements</span>
+        <span id="round-label">Round 1/27</span>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+      </div>
+      <div id="hud-jury-split">
+        <div id="jury-split-bar">
+          <div id="split-guilty" class="split-segment"></div>
+          <div id="split-undecided" class="split-segment"></div>
+          <div id="split-innocent" class="split-segment"></div>
+        </div>
+        <div id="jury-split-labels">
+          <span class="guilty-label">GUILTY <span id="guilty-count">0</span></span>
+          <span class="undecided-label">UNDECIDED <span id="undecided-count">12</span></span>
+          <span class="innocent-label">NOT GUILTY <span id="innocent-count">0</span></span>
+        </div>
+      </div>
+      <div id="hud-stats">
+        <div id="momentum-bar">
+          <span class="momentum-label">Defense</span>
+          <div id="momentum-track">
+            <div id="momentum-indicator"></div>
+          </div>
+          <span class="momentum-label">Prosecution</span>
+        </div>
+        <div id="hud-meta">
+          <span id="objections-label">Objections: <b id="obj-sustained">0</b>S / <b id="obj-overruled">0</b>O</span>
+          <span id="cost-label">$<span id="api-cost">0.00</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar (click agent to open) -->
+  <div id="sidebar" class="hidden">
+    <button id="sidebar-close">&times;</button>
+    <div id="sidebar-content"></div>
+  </div>
+
+  <!-- Transcript feed (bottom) -->
+  <div id="transcript-container">
+    <div id="transcript-toggle">&#9650; Transcript</div>
+    <div id="transcript-feed"></div>
+  </div>
+
+  <!-- Verdict overlay -->
+  <div id="verdict-overlay" class="hidden">
+    <div id="verdict-content">
+      <h1 id="verdict-text"></h1>
+      <div id="verdict-vote"></div>
+      <div id="verdict-stats"></div>
+    </div>
+  </div>
+
+  <!-- Camera preset buttons -->
+  <div id="camera-presets">
+    <button data-view="overview" class="active" title="Overview">1</button>
+    <button data-view="jury" title="Jury">2</button>
+    <button data-view="witness" title="Witness">3</button>
+    <button data-view="judge" title="Judge">4</button>
+    <button data-view="cinematic" title="Cinematic">5</button>
+  </div>
+
+  <!-- Pause/Resume + real-time controls -->
+  <div id="sim-controls">
+    <button id="btn-pause" title="Pause (P)">&#10074;&#10074;</button>
+    <button id="btn-resume" title="Resume (R)" class="hidden">&#9654;</button>
+    <button id="btn-realtime" title="Toggle real-time TTS" class="rt-off">TTS</button>
+  </div>
+
+  <!-- New Trial button (top right) -->
+  <button id="btn-new-trial" title="Start a new trial">+ New Trial</button>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script>
+    // Register service worker to bust all caches
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/court/sw.js').then(() => {
+        console.log('[SW] Cache buster registered');
+      });
+    }
+    // Force reload all modules with timestamp
+    const v = Date.now();
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = `src/main.js?_cb=${v}`;
+    document.body.appendChild(s);
+  </script>
+</body>
+</html>

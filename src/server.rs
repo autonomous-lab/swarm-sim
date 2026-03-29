@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::{self, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::Tier;
@@ -38,6 +39,11 @@ pub struct AppState {
 // ---------------------------------------------------------------------------
 
 pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) -> Router {
+    // If court/ directory exists next to web/, also serve it at /court/
+    let court_dir = std::path::Path::new(web_dir)
+        .parent()
+        .map(|p| p.join("court"))
+        .unwrap_or_default();
     let cors = if cors_permissive {
         CorsLayer::permissive()
     } else {
@@ -84,9 +90,26 @@ pub fn create_router(app_state: AppState, web_dir: &str, cors_permissive: bool) 
         .route("/api/validate", get(validate_state_endpoint))
         .route("/api/export/json", get(export_json))
         .route("/api/export/metrics", get(export_metrics_json))
+        // Trials persistence
+        .route("/api/trials", get(list_trials))
+        .route("/api/trial-replay/:trial_id", get(get_trial_by_id))
+        // TTS WebSocket (Gemini Live API streaming)
+        .route("/ws/tts", get(ws_tts_handler))
+        // Trial endpoints
+        .route("/api/trial/status", get(get_trial_status))
+        .route("/api/trial/jury", get(get_trial_jury))
+        .route("/api/trial/jury/{seat}", get(get_trial_juror))
+        .route("/api/trial/transcript", get(get_trial_transcript))
+        .route("/api/trial/objections", get(get_trial_objections))
+        .route("/api/trial/evidence", get(get_trial_evidence))
+        .route("/api/trial/verdict", get(get_trial_verdict))
+        .route("/api/trial/momentum", get(get_trial_momentum))
         // WebSocket
         .route("/ws", get(ws_handler))
-        // Static files (web UI)
+        // Serve court UI at /court/ with no-cache headers
+        .nest_service("/court", ServeDir::new(&court_dir)
+            .append_index_html_on_directories(true))
+        // Static files — default web UI
         .fallback_service(ServeDir::new(web_dir))
         .layer(cors)
         .with_state(app_state)
@@ -1047,5 +1070,368 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trial endpoints
+// ---------------------------------------------------------------------------
+
+async fn get_trial_status(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => {
+            let (guilty, undecided, innocent) = trial.jury_split();
+            let (sustained, overruled) = trial.objection_stats();
+            Json(serde_json::json!({
+                "phase": format!("{}", trial.current_phase),
+                "round": s.world.current_round,
+                "total_rounds": s.config.simulation.total_rounds,
+                "jury_split": { "guilty": guilty, "undecided": undecided, "innocent": innocent },
+                "momentum": trial.current_momentum(),
+                "objections": { "sustained": sustained, "overruled": overruled },
+                "momentum_shifts": trial.momentum_shifts(),
+                "verdict": trial.verdict,
+                "witness_on_stand": trial.current_witness.map(|id| id.to_string()),
+            }))
+            .into_response()
+        }
+        None => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response()
+        }
+    }
+}
+
+async fn get_trial_jury(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => {
+            let mut jurors: Vec<serde_json::Value> = trial.juror_states.iter()
+                .map(|(id, js)| {
+                    let name = s.agents.get(id).map(|a| a.name.clone()).unwrap_or_default();
+                    serde_json::json!({
+                        "agent_id": id.to_string(),
+                        "name": name,
+                        "seat": js.seat,
+                        "conviction": js.conviction,
+                        "confidence": js.confidence,
+                        "emotional_state": js.emotional_state,
+                        "trust_prosecution": js.trust_prosecution,
+                        "trust_defense": js.trust_defense,
+                        "conviction_label": js.conviction_label(),
+                        "vote": js.vote,
+                        "key_moments": js.key_moments,
+                        "conviction_history": js.conviction_history,
+                    })
+                })
+                .collect();
+            jurors.sort_by_key(|j| j["seat"].as_u64().unwrap_or(0));
+            Json(jurors).into_response()
+        }
+        None => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response()
+        }
+    }
+}
+
+async fn get_trial_juror(
+    State(state): State<AppState>,
+    Path(seat): Path<u8>,
+) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => {
+            let juror = trial.juror_states.values().find(|j| j.seat == seat);
+            match juror {
+                Some(js) => Json(serde_json::json!({
+                    "seat": js.seat,
+                    "conviction": js.conviction,
+                    "confidence": js.confidence,
+                    "emotional_state": js.emotional_state,
+                    "trust_prosecution": js.trust_prosecution,
+                    "trust_defense": js.trust_defense,
+                    "conviction_label": js.conviction_label(),
+                    "vote": js.vote,
+                    "key_moments": js.key_moments,
+                    "conviction_history": js.conviction_history,
+                    "biases": js.biases,
+                })).into_response(),
+                None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Juror not found"}))).into_response(),
+            }
+        }
+        None => {
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response()
+        }
+    }
+}
+
+async fn get_trial_transcript(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => Json(&trial.transcript).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response(),
+    }
+}
+
+async fn get_trial_objections(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => Json(&trial.objection_history).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response(),
+    }
+}
+
+async fn get_trial_evidence(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => Json(&trial.evidence).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response(),
+    }
+}
+
+async fn get_trial_verdict(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => match &trial.verdict {
+            Some(v) => Json(v).into_response(),
+            None => Json(serde_json::json!({"status": "deliberation_in_progress"})).into_response(),
+        },
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response(),
+    }
+}
+
+async fn get_trial_momentum(State(state): State<AppState>) -> impl IntoResponse {
+    let s = state.sim_state.read().await;
+    match &s.trial {
+        Some(trial) => Json(&trial.momentum).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "No trial active"}))).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trial persistence endpoints
+// ---------------------------------------------------------------------------
+
+async fn list_trials() -> impl IntoResponse {
+    Json(crate::trial_store::list_trials())
+}
+
+async fn get_trial_by_id(Path(trial_id): Path<String>) -> impl IntoResponse {
+    let id = trial_id;
+    tracing::info!("GET trial-replay/{}", id);
+    match crate::trial_store::load_trial(&id) {
+        Some(trial) => {
+            tracing::info!("Trial {} found, serializing...", id);
+            Json(serde_json::to_value(&trial).unwrap_or_default()).into_response()
+        }
+        None => {
+            tracing::warn!("Trial {} not found", id);
+            (StatusCode::NOT_FOUND, "Trial not found").into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TTS WebSocket — Gemini Live API streaming
+// Client sends: {"text":"...","voice":"..."}
+// Server sends: binary PCM16 LE 16kHz chunks as they arrive from Gemini
+// Server sends: text message "DONE" when finished
+// ---------------------------------------------------------------------------
+
+async fn ws_tts_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(handle_tts_ws)
+}
+
+async fn handle_tts_ws(mut socket: WebSocket) {
+    use base64::Engine;
+
+    let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        let _ = socket.send(Message::Text("{\"error\":\"no api key\"}".into())).await;
+        return;
+    }
+
+    // Wait for client to send TTS request
+    while let Some(Ok(msg)) = socket.recv().await {
+        let text_msg = match msg {
+            Message::Text(t) => t.to_string(),
+            Message::Close(_) => return,
+            _ => continue,
+        };
+
+        let req: serde_json::Value = match serde_json::from_str(&text_msg) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let text = match req.get("text").and_then(|t| t.as_str()) {
+            Some(t) => t.to_string(),
+            None => continue,
+        };
+        let voice = req.get("voice").and_then(|v| v.as_str()).unwrap_or("Charon").to_string();
+
+        // Connect to Gemini Live API WebSocket
+        let gemini_url = format!(
+            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={}",
+            api_key
+        );
+
+        tracing::info!("TTS WS: connecting to Gemini for voice={voice}, text_len={}", text.len());
+
+        let gemini_conn = match tokio_tungstenite::connect_async(&gemini_url).await {
+            Ok((ws, _)) => {
+                tracing::info!("TTS WS: connected to Gemini Live API");
+                ws
+            }
+            Err(e) => {
+                tracing::error!("TTS WS: Gemini connect failed: {e}");
+                let _ = socket.send(Message::Text(format!("{{\"error\":\"connect: {e}\"}}"))).await;
+                continue;
+            }
+        };
+
+        use futures::SinkExt;
+        let (mut gemini_tx, mut gemini_rx) = gemini_conn.split();
+
+        // Send config
+        let config = serde_json::json!({
+            "setup": {
+                "model": "models/gemini-3.1-flash-live-preview",
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": { "voiceName": voice }
+                        }
+                    }
+                },
+                "systemInstruction": {
+                    "parts": [{ "text": "You are a voice actor in a courtroom drama. Read the given text exactly as written, with appropriate emotion, pacing, and gravitas. Do not add any words." }]
+                }
+            }
+        });
+        if let Err(e) = gemini_tx.send(tokio_tungstenite::tungstenite::Message::Text(config.to_string().into())).await {
+            tracing::error!("Gemini config send failed: {e}");
+            continue;
+        }
+
+        // Wait for setup complete
+        use futures::StreamExt;
+        if let Some(Ok(setup_msg)) = gemini_rx.next().await {
+            let setup_text = setup_msg.to_text().unwrap_or("");
+            tracing::info!("TTS WS: setup response: {}", &setup_text[..setup_text.len().min(200)]);
+            if !setup_text.contains("setupComplete") {
+                tracing::warn!("TTS WS: setup may have failed");
+                let _ = socket.send(Message::Text(format!("{{\"error\":\"setup: {}\"}}", &setup_text[..setup_text.len().min(100)]))).await;
+                continue;
+            }
+        } else {
+            tracing::error!("TTS WS: no setup response from Gemini");
+            let _ = socket.send(Message::Text("{\"error\":\"no setup response\"}".into())).await;
+            continue;
+        }
+
+        // Send text input via realtimeInput (Live API format)
+        let input = serde_json::json!({
+            "realtimeInput": {
+                "text": text
+            }
+        });
+        if let Err(e) = gemini_tx.send(tokio_tungstenite::tungstenite::Message::Text(input.to_string().into())).await {
+            tracing::error!("Gemini input send failed: {e}");
+            continue;
+        }
+
+        tracing::info!("TTS WS: sent text input, waiting for audio...");
+
+        // Stream audio chunks from Gemini to client
+        // Use a timeout to detect end of speech (Gemini Live doesn't always send turnComplete)
+        let mut chunk_count = 0u32;
+        let mut total_bytes = 0usize;
+        let mut msg_count = 0u32;
+        loop {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(if chunk_count > 0 { 3000 } else { 12000 }),
+                gemini_rx.next()
+            ).await;
+
+            let result = match result {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    tracing::info!("TTS WS: stream ended. {} chunks, {} bytes", chunk_count, total_bytes);
+                    break;
+                }
+                Err(_) => {
+                    // Timeout — no more audio
+                    tracing::info!("TTS WS: silence timeout. {} chunks, {} bytes", chunk_count, total_bytes);
+                    break;
+                }
+            };
+            let gemini_msg = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("TTS WS: Gemini recv error: {e}");
+                    break;
+                }
+            };
+            // Extract text from any frame type (Gemini sends JSON as both Text and Binary)
+            let msg_text = match &gemini_msg {
+                tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
+                tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                    match String::from_utf8(b.to_vec()) {
+                        Ok(s) => s,
+                        Err(_) => continue, // truly binary, skip
+                    }
+                }
+                tokio_tungstenite::tungstenite::Message::Close(_) => {
+                    tracing::info!("TTS WS: Gemini closed. {} chunks, {} bytes", chunk_count, total_bytes);
+                    break;
+                }
+                _ => continue,
+            };
+
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg_text) {
+                // Extract base64 audio from serverContent.modelTurn.parts[].inlineData.data
+                if let Some(b64) = v.get("serverContent")
+                    .and_then(|sc| sc.get("modelTurn"))
+                    .and_then(|mt| mt.get("parts"))
+                    .and_then(|p| p.get(0))
+                    .and_then(|p| p.get("inlineData"))
+                    .and_then(|d| d.get("data"))
+                    .and_then(|d| d.as_str())
+                {
+                    use base64::Engine;
+                    if let Ok(pcm_bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                        if pcm_bytes.len() > 10 {
+                            chunk_count += 1;
+                            total_bytes += pcm_bytes.len();
+                            if chunk_count == 1 {
+                                tracing::info!("TTS WS: first PCM chunk {} bytes", pcm_bytes.len());
+                            }
+                            if socket.send(Message::Binary(pcm_bytes.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Check for turn complete
+                if v.get("serverContent")
+                    .and_then(|sc| sc.get("turnComplete"))
+                    .and_then(|tc| tc.as_bool())
+                    .unwrap_or(false)
+                {
+                    tracing::info!("TTS WS: turnComplete. {} chunks, {} bytes", chunk_count, total_bytes);
+                    let _ = socket.send(Message::Text("DONE".into())).await;
+                    break;
+                }
+            }
+        }
+
+        // Signal client that audio is done
+        let _ = socket.send(Message::Text("DONE".into())).await;
+
+        // Close Gemini connection
+        let _ = gemini_tx.close().await;
     }
 }

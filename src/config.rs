@@ -37,7 +37,12 @@ pub struct SimulationSettings {
     pub random_seed: u64,
     #[serde(default)]
     pub challenge_question: Option<String>,
+    /// Simulation mode: "standard" or "trial" (courtroom).
+    #[serde(default = "default_sim_mode")]
+    pub mode: String,
 }
+
+fn default_sim_mode() -> String { "standard".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TierConfig {

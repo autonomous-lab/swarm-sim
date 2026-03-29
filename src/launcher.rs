@@ -11,6 +11,7 @@ use crate::engine::{
     EngineControls, SharedState, SimStatus, SimulationEngine, SimulationState, WsEvent,
 };
 use crate::llm::LlmClient;
+use crate::trial::{TrialSchedule, TrialState};
 use crate::world::WorldState;
 use crate::{god_eye, parser};
 
@@ -83,6 +84,12 @@ pub async fn launch_simulation(
             "[REPRODUCIBLE RESEARCH RUN] {}\n\nThis is a controlled research simulation. \
              Agents should behave consistently with their profiles. Focus on measurable dynamics: \
              opinion diffusion speed, cascade patterns, polarization evolution, and influence concentration.",
+            req.scenario_prompt
+        ),
+        "trial" => format!(
+            "[TRIAL SIMULATION] {}\n\nThis is a COURTROOM TRIAL. The LLM must generate court participants: \
+             1 Judge (tier1), 1 Prosecutor + 1 Defense Attorney + 2-4 Witnesses (tier2), 12 Jurors (tier3). \
+             The scenario describes the case being tried. Generate realistic legal proceedings.",
             req.scenario_prompt
         ),
         _ => req.scenario_prompt, // "standard" or unknown
@@ -160,6 +167,104 @@ pub async fn launch_simulation(
         s.syntheses = Vec::new();
         s.prompt_tokens = 0;
         s.completion_tokens = 0;
+        s.trial = None;
+
+        // Initialize trial state if trial mode
+        if req.mode == "trial" {
+            let schedule = TrialSchedule::default();
+            s.config.simulation.total_rounds = schedule.total_rounds();
+            let mut trial_state = TrialState::new(schedule);
+
+            // Dedup names: collect names used by Tier1 + Tier2 (court officers)
+            let reserved_names: std::collections::HashSet<String> = s.agents.iter()
+                .filter(|(_, p)| matches!(p.tier, Tier::Tier1 | Tier::Tier2))
+                .map(|(_, p)| p.name.to_lowercase())
+                .collect();
+
+            // Rename any Tier3 agent whose name collides with a court officer
+            let tier3_ids: Vec<Uuid> = s.agents.iter()
+                .filter(|(_, p)| matches!(p.tier, Tier::Tier3))
+                .map(|(id, _)| *id)
+                .collect();
+
+            let rename_pool = [
+                "Alex Thompson", "Carmen Rivera", "James Park", "Sofia Andersson",
+                "Marcus Johnson", "Elena Petrova", "Daniel Kim", "Olivia Williams",
+                "Hassan Ahmed", "Grace Chen", "Thomas O'Brien", "Priya Nair",
+                "Robert Kim", "Sarah Collins", "Michael Torres", "Linda Chen",
+            ];
+            let mut rename_idx = 0;
+            let mut used_names: std::collections::HashSet<String> = reserved_names.clone();
+
+            for id in &tier3_ids {
+                if let Some(agent) = s.agents.get_mut(id) {
+                    if used_names.contains(&agent.name.to_lowercase()) {
+                        // Name collision — rename this juror
+                        while rename_idx < rename_pool.len()
+                            && used_names.contains(&rename_pool[rename_idx].to_lowercase())
+                        {
+                            rename_idx += 1;
+                        }
+                        if rename_idx < rename_pool.len() {
+                            tracing::info!("Renamed juror '{}' -> '{}' (name collision)", agent.name, rename_pool[rename_idx]);
+                            agent.name = rename_pool[rename_idx].to_string();
+                            agent.username = format!("juror_{}", rename_pool[rename_idx].to_lowercase().replace(' ', "_"));
+                            rename_idx += 1;
+                        }
+                    }
+                    used_names.insert(agent.name.to_lowercase());
+                }
+            }
+
+            let mut seat = 1u8;
+            for id in &tier3_ids {
+                if seat <= 12 {
+                    trial_state.add_juror(*id, seat);
+                    seat += 1;
+                }
+            }
+
+            // If we have fewer than 12 tier3 agents, create synthetic jurors
+            // to fill the remaining seats
+            let juror_names = [
+                "Alex Thompson", "Carmen Rivera", "James Park", "Sofia Andersson",
+                "Marcus Johnson", "Elena Petrova", "Daniel Kim", "Olivia Williams",
+                "Hassan Ahmed", "Grace Chen", "Thomas O'Brien", "Priya Nair",
+            ];
+            while seat <= 12 {
+                let juror_id = Uuid::new_v4();
+                let idx = (seat - 1) as usize;
+                let name = juror_names.get(idx).unwrap_or(&"Juror");
+                let profile = crate::agent::AgentProfile {
+                    id: juror_id,
+                    name: name.to_string(),
+                    username: format!("juror_{}", seat),
+                    tier: Tier::Tier3,
+                    bio: format!("Juror #{} in the trial", seat),
+                    persona: "An ordinary citizen serving on jury duty.".into(),
+                    stance: crate::agent::Stance::Neutral,
+                    sentiment_bias: 0.0,
+                    influence_weight: 0.1,
+                    archetype: crate::agent::BehaviorArchetype::Normie,
+                    activity_level: 1.0,
+                    active_hours: (0..24).collect(),
+                    interests: vec!["justice".into()],
+                    age: Some(30 + (seat as u32 * 3)),
+                    profession: Some("Citizen".into()),
+                    source_entity: None,
+                    country: None,
+                    language_style: "casual".into(),
+                };
+                s.agents.insert(juror_id, profile);
+                s.agent_states.insert(juror_id, AgentState::new(juror_id));
+                trial_state.add_juror(juror_id, seat);
+                seat += 1;
+            }
+
+            s.trial = Some(trial_state);
+            tracing::info!("Trial mode initialized with 12 jurors ({} from extraction, {} synthetic)",
+                tier3_ids.len().min(12), 12_usize.saturating_sub(tier3_ids.len()));
+        }
 
         // Seed social graph
         seed_social_graph(&mut s);
