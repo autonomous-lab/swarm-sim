@@ -107,6 +107,87 @@ Each agent generates content matching their profile:
 | `policy` | Public opinion test for policy announcements |
 | `brand` | Brand reputation analysis — loyalty, backlash, recovery |
 | `research` | Reproducible runs with fixed seed |
+| `trial` | **AI Tribunal** — courtroom trial simulation (see below) |
+
+---
+
+## AI Tribunal — Courtroom Trial Mode
+
+A courtroom simulation where every participant — judge, prosecutor, defense attorney, witnesses, and 12 jurors — is an AI agent with its own personality, cognitive biases, and evolving beliefs.
+
+### How It Works
+
+The trial engine maps directly onto swarm-sim's tiered architecture:
+
+| Tier | Role | Model | Purpose |
+|------|------|-------|---------|
+| **Tier 1** | Judge | Best | Directs proceedings, rules on objections, instructs jury |
+| **Tier 2** | Attorneys + Witnesses | Mid | Arguments, cross-examination, testimony |
+| **Tier 3** | 12 Jurors | Cheap (batched) | Internal reactions, conviction shifts, deliberation |
+
+Trials follow a 27-round procedural structure: Opening Statements (2) → Prosecution Case (8) → Defense Case (8) → Rebuttal (2) → Closing Arguments (2) → Jury Deliberation (5).
+
+### Jury Cognitive Model
+
+Each juror has:
+- **Conviction** (-1.0 innocent to 1.0 guilty) that shifts with every argument
+- **Confidence** — how certain they are of their position
+- **Cognitive biases** — anchoring, recency, authority, sympathy, confirmation — each juror is different
+- **Trust** toward each attorney that builds over time
+- **Key moments** — the 3 arguments that shifted them most
+
+### 3D Courtroom (Three.js)
+
+The trial runs in a real-time 3D courtroom at `/court/`:
+- Low-poly characters with conviction-based color coding
+- Floating labels with live conviction gauges per juror
+- Speech bubbles synchronized with TTS playback
+- HUD with jury split bar, momentum, phase progress, objection stats
+- Sidebar with full argument history per participant
+- Transcript with active entry highlight
+
+### Text-to-Speech (Gemini Live API)
+
+Optional real-time mode with streaming TTS:
+- 20 distinct Gemini voices mapped to court roles
+- Gender-aware voice assignment from speaker names
+- Streaming PCM via WebSocket for instant playback (~500ms TTFB)
+- Simulation auto-pauses during speech, resumes when done
+- Ace Attorney-style objections with judge auto-ruling
+
+### Trial Persistence & Replay
+
+Every completed trial is saved to `data/trials/` as JSON. Trials can be:
+- Listed via `GET /api/trials`
+- Replayed in the 3D courtroom via `/court/?trial=<id>`
+- Shared via URL
+
+### Quick Start (Trial Mode)
+
+```bash
+# Start the server
+swarm-sim server -c config.toml
+
+# Open http://localhost:3000/court/ in your browser
+# Pick a case from 10 presets or describe your own
+# Toggle "Real-time mode" for TTS voices
+```
+
+### Trial API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/trial/status` | Phase, round, jury split, momentum |
+| `GET` | `/api/trial/jury` | All jurors with conviction, confidence, biases |
+| `GET` | `/api/trial/jury/:seat` | Single juror detail |
+| `GET` | `/api/trial/transcript` | Full trial transcript |
+| `GET` | `/api/trial/objections` | Objection history with rulings |
+| `GET` | `/api/trial/verdict` | Final verdict and vote breakdown |
+| `GET` | `/api/trials` | List saved trials |
+| `GET` | `/api/trial-replay/:id` | Load saved trial for replay |
+| `WS` | `/ws/tts` | Streaming TTS via Gemini Live API |
+
+---
 
 ### Analytics (50+ Metrics)
 | Category | Key Metrics |
@@ -405,12 +486,42 @@ swarm-sim/
 │   ├── god_eye.rs               # File watcher for live event injection
 │   ├── report.rs                # Post-simulation report with quantitative metrics
 │   ├── output.rs                # JSONL logger + terminal progress bars
-│   └── server.rs                # Axum REST API (25+ endpoints) + WebSocket + static files
-└── web/
-    ├── index.html               # SPA shell
-    ├── style.css                # Dark theme
-    ├── app.js                   # WebSocket client + state management
-    └── components.js            # UI rendering components
+│   ├── server.rs                # Axum REST API (25+ endpoints) + WebSocket + TTS proxy
+│   ├── trial.rs                 # AI Tribunal: court roles, phases, jury cognitive model
+│   ├── trial_engine.rs          # Trial round execution, witness matching, objections
+│   └── trial_store.rs           # Trial persistence (save/list/load/replay)
+├── web/                         # Standard social simulation UI
+│   ├── index.html
+│   ├── style.css
+│   ├── app.js
+│   └── components.js
+├── court/                       # AI Tribunal 3D courtroom UI
+│   ├── index.html               # Entry point
+│   ├── style.css                # Dark theme + mobile responsive
+│   ├── sw.js                    # Service worker (cache busting)
+│   └── src/
+│       ├── main.js              # Three.js init + event wiring
+│       ├── scene/
+│       │   ├── scene.js         # Courtroom geometry + lighting
+│       │   ├── characters.js    # Low-poly agents + dynamic colors
+│       │   ├── camera.js        # Presets + OrbitControls
+│       │   └── animations.js    # Speaking, objection, verdict animations
+│       ├── ui/
+│       │   ├── hud.js           # Phase, jury split, momentum, objections
+│       │   ├── labels.js        # CSS2D labels + speech bubbles
+│       │   ├── transcript.js    # Live transcript feed
+│       │   ├── sidebar.js       # Agent detail panel
+│       │   ├── launcher.js      # Case selection + presets + replay
+│       │   ├── tts.js           # Gemini Live TTS streaming
+│       │   └── verdict.js       # Cinematic verdict reveal
+│       ├── state/
+│       │   ├── store.js         # Reactive state management
+│       │   └── websocket.js     # WebSocket + initial state fetch
+│       └── utils/
+│           ├── colors.js        # Conviction-to-color mapping
+│           └── math.js          # Easing, interpolation
+└── data/
+    └── trials/                  # Saved trial JSON files
 ```
 
 ### Key Design Decisions
